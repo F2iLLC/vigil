@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 
 from vigil.models import Finding, PersonaVerdict, ReviewResult, Severity
 from vigil.personas import Persona, ReviewProfile
-from vigil.reviewer import _parse_json_response, _parse_findings, review_diff
+from vigil.reviewer import _parse_json_response, _parse_findings, _is_transient_llm_error, review_diff
 
 
 # ---------- _parse_json_response ----------
@@ -276,6 +276,13 @@ class TestTransientSpecialistErrors:
         assert specialist.observations[0].category == "reviewer_unavailable"
         assert specialist.observations[0].severity == Severity.low
 
+    def test_quota_429_is_not_transient(self):
+        """Quota and billing 429s should remain blocking reviewer errors."""
+        assert not _is_transient_llm_error(
+            Exception("429: You exceeded your current quota, please check your plan and billing details")
+        )
+        assert _is_transient_llm_error(Exception("429 rate_limit: retry after 30 seconds"))
+
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer._call_llm_with_retry")
     def test_503_does_not_block_overall_review(self, mock_llm, mock_alerts):
@@ -327,3 +334,44 @@ class TestTransientSpecialistErrors:
         assert specialist.decision == "ERROR"
         assert len(specialist.findings) == 1
         assert specialist.findings[0].category == "reviewer_error"
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_quota_429_produces_error_finding(self, mock_llm, mock_alerts):
+        """A non-retryable 429 should produce an ERROR verdict, not a skipped specialist."""
+        mock_alerts.return_value = 0
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [
+            Exception("429: insufficient_quota - check billing details"),
+            lead_resp,
+        ]
+
+        profile = self._make_profile()
+        result = review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
+
+        specialist = result.specialist_verdicts[0]
+        assert specialist.decision == "ERROR"
+        assert len(specialist.findings) == 1
+        assert specialist.findings[0].category == "reviewer_error"
+        assert len(specialist.observations) == 0
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_specialist_observations_are_sent_to_lead(self, mock_llm, mock_alerts):
+        """Skipped-specialist observations should be visible to the lead reviewer."""
+        mock_alerts.return_value = 0
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [Exception("503 Service Unavailable"), lead_resp]
+
+        profile = self._make_profile()
+        review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
+
+        lead_messages = mock_llm.call_args_list[1].kwargs["messages"]
+        lead_prompt = lead_messages[1]["content"]
+        assert "Observations:" in lead_prompt
+        assert "review skipped" in lead_prompt.lower()
+        assert "No findings." in lead_prompt

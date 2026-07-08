@@ -77,6 +77,22 @@ def _gen_session_id() -> str:
 def _is_transient_llm_error(e: Exception) -> bool:
     """Return True for errors indicating temporary LLM infrastructure unavailability."""
     err_str = str(e).lower()
+    return _is_retryable_llm_error(err_str)
+
+
+def _is_retryable_llm_error(err: Exception | str) -> bool:
+    """Return True only for provider errors likely to recover with retry."""
+    err_str = str(err).lower()
+    non_retryable_429_markers = (
+        "billing",
+        "quota",
+        "insufficient_quota",
+        "exceeded your current quota",
+        "hard limit",
+        "payment",
+    )
+    if "429" in err_str and any(marker in err_str for marker in non_retryable_429_markers):
+        return False
     return any(x in err_str for x in ("rate_limit", "429", "503", "service unavailable", "unavailable", "timeout", "timed out"))
 
 
@@ -86,8 +102,7 @@ def _call_llm_with_retry(messages: list[dict], model: str, **kwargs):
         try:
             return completion(model=model, messages=messages, **kwargs)
         except Exception as e:
-            err_str = str(e).lower()
-            if "rate_limit" in err_str or "429" in err_str or "503" in err_str or "service unavailable" in err_str:
+            if _is_retryable_llm_error(e):
                 wait = INITIAL_BACKOFF * (2 ** attempt)
                 time.sleep(wait)
             else:
@@ -173,10 +188,18 @@ def _run_lead_review(
                 for f in v.findings
             )
         findings_header = "Findings:\n" + findings_str if findings_str else "No findings."
+        observations_str = ""
+        if v.observations:
+            observations_str = "\n".join(
+                f"  - [{f.severity.value}] {f.file}:{f.line or '?'} -- {f.message}"
+                for f in v.observations
+            )
+        observations_header = "Observations:\n" + observations_str if observations_str else "No observations."
         verdicts_text += f"""
 ### {v.persona} [{v.session_id}]: {v.decision}
 Checks: {checks_str}
 {findings_header}
+{observations_header}
 """
 
     user_message = f"""{pr_block}
