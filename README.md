@@ -76,6 +76,7 @@ Options:
 ```
 vigil dismiss-resolved <PR_URL>
 ```
+
 Resolve Vigil comment threads that received a "resolved" reply. Also logs the decision so the finding pattern is suppressed in future reviews.
 
 ```
@@ -87,6 +88,7 @@ Options:
   --remove INT            Remove a specific decision by ID (re-enables that pattern)
   --clear                 Clear all decisions for the repo
 ```
+
 Browse, filter, and manage the decision log. See what Vigil is suppressing, why each finding was dismissed, and selectively re-enable patterns as the repo matures.
 
 ```
@@ -99,11 +101,13 @@ Options:
   --lead-model TEXT       LLM model for lead reviewer
   --profile TEXT          Review profile
 ```
+
 Start the webhook server to auto-review PRs when they are opened, reopened, or marked ready for review.
 
 ```
 vigil profiles
 ```
+
 List available review profiles and their specialists.
 
 ### Examples
@@ -150,15 +154,18 @@ When `--post` is used, Vigil automatically creates GitHub issues for non-blockin
 Vigil remembers findings you've already acknowledged so it doesn't keep flagging the same patterns:
 
 **How decisions get logged:**
+
 - Reply "resolved", "fixed", "addressed", or "done" to a Vigil inline comment
 - Vigil captures the reply text as the reason and the author as `decided_by`
 - Decision type is inferred: "false positive" → `false_positive`, "wontfix"/"acceptable" → `wontfix`, everything else → `accepted`
 
 **How decisions suppress findings:**
+
 - Before each review, findings are checked against the decision log by (repo, file, category) + fuzzy message matching (≥85% similarity)
 - Matching findings are silently suppressed
 
 **Managing decisions:**
+
 ```bash
 # See what's suppressed and why
 vigil decisions owner/repo
@@ -179,6 +186,7 @@ vigil serve --port 8000 -m gemini/gemini-2.5-flash
 ```
 
 The server listens for GitHub webhook events:
+
 - **PR opened/reopened/ready_for_review** → triggers a review
 - **`/vigil review` comment** → triggers an on-demand review
 - **Resolution replies** → resolves threads and logs decisions
@@ -201,6 +209,19 @@ SMTP_USER=vigil@company.com
 SMTP_PASSWORD=app-specific-password
 ```
 
+Alongside email, the same findings are also POSTed to LunaOS's escalation-gate
+webhook (`/api/escalations`), which fans them out to Telegram. This is
+additive — email alerting works the same whether or not the webhook is
+configured.
+
+```bash
+# .env
+LUNAOS_ESCALATION_URL=https://hetzner-api.lunaos.io/api/escalations
+ESCALATION_INGEST_TOKEN=shared-secret-token
+```
+
+Leave `LUNAOS_ESCALATION_URL` unset to disable the escalation webhook.
+
 ## GitHub Action
 
 ### Drop-in workflow (for your own repo)
@@ -215,7 +236,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: write  # needed for auto-issue creation
+  issues: write # needed for auto-issue creation
 
 jobs:
   review:
@@ -248,14 +269,14 @@ jobs:
 
 ### `default` — 6 specialists + lead
 
-| Specialist | Focus | Blocking |
-|---|---|---|
-| **Logic** | Bugs, off-by-one, null handling, race conditions | Yes |
-| **Security** | Injection, secrets, auth gaps, OWASP top 10 | No (observations → issues) |
-| **Architecture** | Coupling, API design, dependency direction | Yes |
-| **Testing** | Coverage gaps, brittle tests, missing error path tests | Yes |
-| **Performance** | N+1 queries, memory leaks, O(n²) on unbounded data | Yes |
-| **DX** | Breaking changes, missing docs, confusing error messages | Yes |
+| Specialist       | Focus                                                    | Blocking                   |
+| ---------------- | -------------------------------------------------------- | -------------------------- |
+| **Logic**        | Bugs, off-by-one, null handling, race conditions         | Yes                        |
+| **Security**     | Injection, secrets, auth gaps, OWASP top 10              | No (observations → issues) |
+| **Architecture** | Coupling, API design, dependency direction               | Yes                        |
+| **Testing**      | Coverage gaps, brittle tests, missing error path tests   | Yes                        |
+| **Performance**  | N+1 queries, memory leaks, O(n²) on unbounded data       | Yes                        |
+| **DX**           | Breaking changes, missing docs, confusing error messages | Yes                        |
 
 Security runs as **non-blocking** by default — its findings become observations that are tracked as issues rather than blocking the PR. This is ideal for early-stage repos where security patterns aren't yet established. You can change this in `personas.py`.
 
@@ -263,10 +284,10 @@ Security runs as **non-blocking** by default — its findings become observation
 
 Everything in `default`, plus:
 
-| Specialist | Focus | Blocking |
-|---|---|---|
-| **Data Architecture** | Schema design, migrations, indexes, entity ownership | Yes |
-| **GxP Compliance** | Audit trails, ALCOA+, 21 CFR Part 11, immutability | Yes |
+| Specialist            | Focus                                                | Blocking |
+| --------------------- | ---------------------------------------------------- | -------- |
+| **Data Architecture** | Schema design, migrations, indexes, entity ownership | Yes      |
+| **GxP Compliance**    | Audit trails, ALCOA+, 21 CFR Part 11, immutability   | Yes      |
 
 The enterprise profile also includes enhanced specialists with tenant isolation checks, cross-package impact analysis, and regulatory-aware reviews.
 
