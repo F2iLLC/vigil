@@ -4,6 +4,7 @@ import bisect
 import fnmatch
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 
 @dataclass
@@ -12,6 +13,38 @@ class FileHunk:
     path: str
     header: str  # the diff --git line + index/mode lines
     content: str  # the actual diff hunks
+
+
+DOC_FILE_GLOBS = (
+    "*.md",
+    "*.mdx",
+    "*.rst",
+    "*.txt",
+    "README",
+    "README.*",
+    "CHANGELOG",
+    "CHANGELOG.*",
+    "CONTRIBUTING",
+    "CONTRIBUTING.*",
+    "CODE_OF_CONDUCT",
+    "CODE_OF_CONDUCT.*",
+    "LICENSE",
+    "LICENSE.*",
+    "NOTICE",
+    "NOTICE.*",
+)
+
+DOC_PATH_PREFIXES = (
+    "docs/",
+    "documentation/",
+    ".github/ISSUE_TEMPLATE/",
+)
+
+DOC_PATH_GLOBS = (
+    ".github/pull_request_template.md",
+    ".github/PULL_REQUEST_TEMPLATE.md",
+    ".github/PULL_REQUEST_TEMPLATE/*.md",
+)
 
 
 def parse_diff(raw_diff: str) -> list[FileHunk]:
@@ -48,6 +81,23 @@ def parse_diff(raw_diff: str) -> list[FileHunk]:
         hunks.append(FileHunk(path=path, header=header, content=content))
 
     return hunks
+
+
+def is_documentation_path(path: str) -> bool:
+    """Return True when a changed file is documentation-only."""
+    normalized = path.replace("\\", "/").lstrip("/")
+    basename = PurePosixPath(normalized).name
+
+    if any(normalized.startswith(prefix) for prefix in DOC_PATH_PREFIXES):
+        return True
+    if any(fnmatch.fnmatch(normalized, pattern) for pattern in DOC_PATH_GLOBS):
+        return True
+    return any(fnmatch.fnmatch(basename, pattern) for pattern in DOC_FILE_GLOBS)
+
+
+def is_documentation_only(hunks: list[FileHunk]) -> bool:
+    """Return True when every changed file in the diff is documentation-only."""
+    return bool(hunks) and all(is_documentation_path(hunk.path) for hunk in hunks)
 
 
 def filter_hunks(hunks: list[FileHunk], patterns: list[str]) -> list[FileHunk]:
