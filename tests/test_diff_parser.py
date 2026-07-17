@@ -5,6 +5,8 @@ import pytest
 from vigil.diff_parser import (
     commentable_lines,
     find_best_file_for_finding,
+    is_documentation_only,
+    is_documentation_path,
     nearest_commentable_line,
     parse_diff,
 )
@@ -154,3 +156,54 @@ class TestCommentableLinesIntegration:
         # A line NOT in the diff — should snap to nearest
         result = nearest_commentable_line("src/app.py", 20, valid)
         assert result is not None
+
+
+class TestDocumentationOnlyDetection:
+
+    def test_markdown_and_docs_paths_are_documentation(self):
+        assert is_documentation_path("README.md")
+        assert is_documentation_path("docs/setup/install.md")
+        assert is_documentation_path(".github/ISSUE_TEMPLATE/bug.md")
+        assert is_documentation_path(".github/PULL_REQUEST_TEMPLATE/release.md")
+
+    def test_runtime_path_is_not_documentation(self):
+        assert not is_documentation_path("src/app.py")
+        assert not is_documentation_path("packages/core/src/index.ts")
+
+    def test_all_documentation_hunks_are_documentation_only(self):
+        diff = """\
+diff --git a/README.md b/README.md
+index 1111111..2222222 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # Vigil
++More docs
+diff --git a/docs/setup.md b/docs/setup.md
+index 1111111..2222222 100644
+--- a/docs/setup.md
++++ b/docs/setup.md
+@@ -1 +1,2 @@
+ # Setup
++Install steps
+"""
+        assert is_documentation_only(parse_diff(diff))
+
+    def test_mixed_hunks_are_not_documentation_only(self):
+        diff = """\
+diff --git a/README.md b/README.md
+index 1111111..2222222 100644
+--- a/README.md
++++ b/README.md
+@@ -1 +1,2 @@
+ # Vigil
++More docs
+diff --git a/src/app.py b/src/app.py
+index 1111111..2222222 100644
+--- a/src/app.py
++++ b/src/app.py
+@@ -1 +1,2 @@
+ print("hi")
++print("bye")
+"""
+        assert not is_documentation_only(parse_diff(diff))

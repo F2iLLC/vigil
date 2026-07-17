@@ -8,7 +8,7 @@ from typing import Callable
 from litellm import completion
 
 from .alerts import send_alerts_for_verdicts
-from .diff_parser import diff_summary, filter_hunks, parse_diff, reassemble_diff
+from .diff_parser import diff_summary, filter_hunks, is_documentation_only, parse_diff, reassemble_diff
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
 from .personas import Persona, ReviewProfile
 
@@ -269,6 +269,33 @@ def review_diff(
     all_hunks = parse_diff(diff)
     full_summary = diff_summary(all_hunks)
 
+    if is_documentation_only(all_hunks):
+        verdicts = [
+            PersonaVerdict(
+                persona=persona.name,
+                session_id=_gen_session_id(),
+                decision="APPROVE",
+                checks={"documentation_only": "PASS"},
+                findings=[],
+                observations=[],
+            )
+            for persona in profile.specialists
+        ]
+        for verdict in verdicts:
+            if on_specialist_done:
+                on_specialist_done(verdict)
+
+        return ReviewResult(
+            decision="APPROVE",
+            summary="Documentation-only changes detected; Vigil auto-approved without model review.",
+            commit_sha=pr_context.get("head_sha", ""),
+            pr_url=pr_context.get("url", ""),
+            model=model,
+            specialist_verdicts=verdicts,
+            lead_findings=[],
+            observations=[],
+            observation_sources=[],
+        )
     # --- Step 1: Sequential specialist reviews ---
     # Each specialist gets only the files matching their patterns
     verdicts: list[PersonaVerdict] = []

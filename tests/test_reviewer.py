@@ -375,3 +375,49 @@ class TestTransientSpecialistErrors:
         assert "Observations:" in lead_prompt
         assert "review skipped" in lead_prompt.lower()
         assert "No findings." in lead_prompt
+
+
+class TestDocumentationOnlyAutoApprove:
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_documentation_only_pr_auto_approves_without_llm(self, mock_llm, mock_alerts):
+        profile = ReviewProfile(
+            name="test",
+            specialists=[
+                Persona(name="Security", focus="Security", system_prompt="Review security"),
+                Persona(name="DX", focus="Docs", system_prompt="Review docs"),
+            ],
+            lead_prompt="Lead",
+        )
+        pr_context = {
+            "title": "Update docs",
+            "author": "user",
+            "head": "docs-branch",
+            "base": "main",
+            "additions": 2,
+            "deletions": 0,
+            "changed_files": 1,
+            "body": "",
+            "head_sha": "abcdef123456",
+            "url": "https://github.com/o/r/pull/1",
+        }
+        diff = """\
+diff --git a/docs/setup.md b/docs/setup.md
+index 1111111..2222222 100644
+--- a/docs/setup.md
++++ b/docs/setup.md
+@@ -1 +1,2 @@
+ # Setup
++New install step
+"""
+
+        result = review_diff(diff, pr_context, profile)
+
+        assert result.decision == "APPROVE"
+        assert "Documentation-only" in result.summary
+        assert len(result.specialist_verdicts) == 2
+        assert all(v.decision == "APPROVE" for v in result.specialist_verdicts)
+        assert all(v.checks == {"documentation_only": "PASS"} for v in result.specialist_verdicts)
+        mock_llm.assert_not_called()
+        mock_alerts.assert_not_called()
