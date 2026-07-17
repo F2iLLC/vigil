@@ -114,16 +114,16 @@ List available review profiles and their specialists.
 
 ```bash
 # Use Gemini Flash (fast + cheap)
-vigil review https://github.com/org/repo/pull/42 -m gemini/gemini-2.5-flash --post
+vigil review https://github.com/org/repo/pull/## -m gemini/gemini-3.1-flash-lite --post
 
 # Use Claude for lead, Gemini for specialists
-vigil review https://github.com/org/repo/pull/42 -m gemini/gemini-2.5-flash --lead-model claude-sonnet-4-6 --post
+vigil review https://github.com/org/repo/pull/## -m gemini/gemini-3.1-flash-lite --lead-model claude-sonnet-4-6 --post
 
 # Enterprise profile (adds GxP, Data Architecture, tenant isolation reviewers)
-vigil review https://github.com/org/repo/pull/42 -p enterprise --post
+vigil review https://github.com/org/repo/pull/## -p enterprise --post
 
 # JSON output for piping into other tools
-vigil review https://github.com/org/repo/pull/42 --json
+vigil review https://github.com/org/repo/pull/## --json
 
 # Browse decision log
 vigil decisions F2iProject/vigil

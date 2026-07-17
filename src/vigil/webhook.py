@@ -123,7 +123,7 @@ def _run_dismiss(pr_url: str):
 
 def create_app(
     webhook_secret: Optional[str] = None,
-    model: str = "gemini/gemini-2.5-flash",
+    model: str = "gemini/gemini-3.1-flash-lite",
     lead_model: Optional[str] = None,
     profile: str = "default",
 ) -> FastAPI:
