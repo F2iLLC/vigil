@@ -16,9 +16,9 @@ inputs:
     required: false
     default: "review"
   model:
-    description: "LLM model for specialists (litellm format, e.g. gemini/gemini-2.5-flash)"
+    description: "LLM model for specialists (litellm format, e.g. gemini/gemini-3.1-flash-lite)"
     required: false
-    default: "gemini/gemini-2.5-flash"
+    default: "gemini/gemini-3.1-flash-lite"
   lead-model:
     description: "LLM model for lead reviewer (defaults to --model value)"
     required: false

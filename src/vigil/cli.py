@@ -95,7 +95,7 @@ def _print_findings(findings: list[Finding], title: str):
 @app.command()
 def review(
     pr_url: str = typer.Argument(help="GitHub PR URL"),
-    model: str = typer.Option("gemini/gemini-2.5-flash", "--model", "-m", help="LLM model for specialists"),
+    model: str = typer.Option("gemini/gemini-3.1-flash-lite", "--model", "-m", help="LLM model for specialists"),
     lead_model: str = typer.Option(None, "--lead-model", help="LLM model for lead reviewer (defaults to --model)"),
     profile: str = typer.Option("default", "--profile", "-p", help="Review profile: default, enterprise"),
     output_json: bool = typer.Option(False, "--json", help="Output raw JSON result"),
@@ -399,7 +399,7 @@ def resolve_addressed(
 def serve(
     port: int = typer.Option(8000, "--port", "-p", help="Port to listen on"),
     host: str = typer.Option("0.0.0.0", "--host", help="Host to bind to"),
-    model: str = typer.Option("gemini/gemini-2.5-flash", "--model", "-m", help="LLM model for reviews"),
+    model: str = typer.Option("gemini/gemini-3.1-flash-lite", "--model", "-m", help="LLM model for reviews"),
     lead_model: str = typer.Option(None, "--lead-model", help="LLM model for lead reviewer"),
     profile: str = typer.Option("default", "--profile", help="Review profile"),
 ):
