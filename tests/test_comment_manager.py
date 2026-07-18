@@ -9,6 +9,7 @@ from vigil.comment_manager import (
     _is_resolution_reply,
     _issue_covers_finding,
     _parse_finding_from_comment,
+    build_conversation_context,
     deduplicate_comments,
     is_duplicate_finding,
     resolve_threads_batch,
@@ -364,6 +365,84 @@ class TestIssueCoversFinding:
         issue = {"title": "Fix bug", "body": "Fix it"}
         finding = ""
         assert _issue_covers_finding(issue, finding) is True  # benefit of doubt
+
+
+# ---------- build_conversation_context ----------
+
+class TestBuildConversationContext:
+
+    def test_empty_inputs_returns_empty_string(self):
+        assert build_conversation_context([], []) == ""
+        assert build_conversation_context([], None) == ""
+
+    def test_includes_comment_author_and_body(self):
+        comments = [{
+            "created_at": "2026-07-15T10:00:00Z",
+            "user": {"login": "codex-bot"},
+            "body": "Your team has set up Codex to review pull requests in this repo.",
+        }]
+        result = build_conversation_context(comments)
+        assert "codex-bot" in result
+        assert "Codex to review pull requests" in result
+
+    def test_skips_blank_body_comments(self):
+        comments = [
+            {"created_at": "2026-07-15T10:00:00Z", "user": {"login": "a"}, "body": "   "},
+            {"created_at": "2026-07-15T10:01:00Z", "user": {"login": "b"}, "body": "real comment"},
+        ]
+        result = build_conversation_context(comments)
+        assert "real comment" in result
+        assert "**a**" not in result
+
+    def test_includes_review_body_with_state(self):
+        reviews = [{
+            "submitted_at": "2026-07-15T11:00:00Z",
+            "user": {"login": "reviewer1"},
+            "state": "APPROVED",
+            "body": "LGTM overall",
+        }]
+        result = build_conversation_context([], reviews)
+        assert "reviewer1" in result
+        assert "review:approved" in result
+        assert "LGTM overall" in result
+
+    def test_skips_reviews_without_body(self):
+        reviews = [{
+            "submitted_at": "2026-07-15T11:00:00Z",
+            "user": {"login": "reviewer1"},
+            "state": "APPROVED",
+            "body": "",
+        }]
+        assert build_conversation_context([], reviews) == ""
+
+    def test_chronological_ordering(self):
+        comments = [
+            {"created_at": "2026-07-15T12:00:00Z", "user": {"login": "later"}, "body": "second"},
+            {"created_at": "2026-07-15T10:00:00Z", "user": {"login": "earlier"}, "body": "first"},
+        ]
+        result = build_conversation_context(comments)
+        assert result.index("first") < result.index("second")
+
+    def test_truncates_long_item(self):
+        comments = [{
+            "created_at": "2026-07-15T10:00:00Z",
+            "user": {"login": "verbose"},
+            "body": "x" * 2000,
+        }]
+        result = build_conversation_context(comments, max_item_chars=100)
+        assert "truncated" in result
+        assert len(result) < 2000
+
+    def test_drops_oldest_items_when_over_budget(self):
+        comments = [
+            {"created_at": f"2026-07-15T{h:02d}:00:00Z", "user": {"login": f"u{h}"}, "body": "x" * 200}
+            for h in range(10)
+        ]
+        result = build_conversation_context(comments, max_total_chars=500, max_item_chars=200)
+        # Most recent author should survive, oldest should be dropped
+        assert "u9" in result
+        assert "u0" not in result
+        assert "omitted for length" in result
 
 
 # ---------- _parse_finding_from_comment ----------

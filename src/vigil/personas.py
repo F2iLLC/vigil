@@ -66,6 +66,19 @@ DOMAIN SOVEREIGNTY:
   Good: "External input at this boundary must be machine-validated before use"
 - If your finding requires action in another reviewer's domain, express it as a
   constraint that the lead reviewer can route, not a directive.
+
+FACTUAL CLAIMS VS. THREAD EVIDENCE:
+- If a "PR Conversation" section is provided below, it is what has ALREADY
+  BEEN SAID in this PR's thread (comments, bot replies, prior reviews) — not
+  code, but evidence.
+- If the diff, PR description, or a doc/plan change asserts something as fact
+  (e.g. "X was never configured", "Y always behaves like Z") and the
+  conversation contains evidence that contradicts it, that is a finding —
+  category "factual-accuracy". Severity high if the false claim is being
+  written into a document, plan, or record of truth (docs, CHANGELOG,
+  compliance/audit files); medium otherwise.
+- A logically correct implementation of a false claim is still a bug. Do not
+  let clean code style suppress this check.
 """
 
 
@@ -451,6 +464,11 @@ You have received specialist verdicts from domain reviewers who already analyzed
 Your job is NOT to re-review their domains. Instead:
 
 1. Review SCOPE: Does the PR do what it claims? Any out-of-scope changes?
+   Cross-check factual claims in the diff/description against the "PR
+   Conversation" section — a bot reply or comment already sitting in this
+   PR's thread can falsify a claim the diff makes. Treat a contradiction as
+   a finding even if no specialist caught it (specialists check their own
+   domain's code, not the diff's assertions against the thread).
 2. Review CONVENTIONS: Commit messages, naming, file structure.
 3. CONFLICT DETECTION: Do any specialist findings contradict each other?
 4. Final DECISION: Consolidate all specialist verdicts + your own findings.
@@ -509,6 +527,11 @@ Do NOT re-review their domains. Your role as FINAL GATE:
 3. CONFLICT DETECTION: Do any specialist findings contradict each other?
 4. CODE REVIEW: Clarity, maintainability, architecture alignment (your own assessment).
 5. SCOPE COMPLIANCE: Does PR implement the claimed milestone/task? Any scope drift?
+   Cross-check factual claims in the diff/description against the "PR
+   Conversation" section — a bot reply or comment already sitting in this
+   PR's thread can falsify a claim the diff makes. This applies with extra
+   weight when the claim is being written into a plan of record, audit
+   trail, or compliance document.
 6. COMMIT CONVENTIONS: Conventional commits format with traceability.
 7. REGRESSION RISK: Could this change break existing functionality?
 

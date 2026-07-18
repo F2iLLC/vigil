@@ -11,7 +11,10 @@ from rich.table import Table
 
 from .audit import write_audit_entry
 from .comment_manager import (
+    build_conversation_context,
+    fetch_all_pr_reviews,
     fetch_all_vigil_comments,
+    fetch_pr_conversation_comments,
     fetch_vigil_comments,
     get_last_reviewed_sha,
     resolve_addressed_threads,
@@ -127,6 +130,20 @@ def review(
         f"{pr_data['changed_files']} files[/dim]"
     )
     console.print(f"[dim]Profile: {review_profile.name} ({len(review_profile.specialists)} specialists)[/dim]\n")
+
+    # Fetch PR conversation (comments + prior reviews) so specialists and the
+    # lead reviewer can cross-check factual claims in the diff/description
+    # against what's already been said in the thread. Best-effort: a fetch
+    # failure degrades to no conversation context, not a review failure.
+    try:
+        conversation_comments = fetch_pr_conversation_comments(owner, repo, pr_number, token)
+        conversation_reviews = fetch_all_pr_reviews(owner, repo, pr_number, token)
+        pr_data["conversation"] = build_conversation_context(conversation_comments, conversation_reviews)
+        if pr_data["conversation"]:
+            console.print(f"[dim]{len(conversation_comments)} conversation comment(s), {len(conversation_reviews)} review(s) fetched for context[/dim]")
+    except Exception as e:
+        console.print(f"[dim yellow]Could not fetch PR conversation: {e}[/dim yellow]")
+        pr_data["conversation"] = ""
 
     # --- Pre-review pipeline: incremental review, resolve, dedup ---
     last_sha = None
