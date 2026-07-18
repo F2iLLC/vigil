@@ -80,6 +80,101 @@ def fetch_all_pr_comments(owner: str, repo: str, pr_number: int, token: str) -> 
     return _paginate(url, _github_headers(token))
 
 
+def fetch_pr_conversation_comments(owner: str, repo: str, pr_number: int, token: str) -> list[dict]:
+    """Fetch top-level PR conversation comments (the Conversation tab).
+
+    A pull request is a GitHub issue under the hood. Inline diff comments live
+    under /pulls/{n}/comments (see fetch_all_pr_comments); general discussion,
+    bot replies (e.g. a connector announcing it reviews PRs), and non-review
+    commentary live under /issues/{n}/comments instead. This is where a claim
+    made in the diff or PR body can be contradicted by something already said
+    in the thread.
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    return _paginate(url, _github_headers(token))
+
+
+def fetch_all_pr_reviews(owner: str, repo: str, pr_number: int, token: str) -> list[dict]:
+    """Fetch all PR reviews (not just Vigil's), for their summary bodies.
+
+    Prior review verdicts are also conversation evidence — a PR that reasserts
+    something a previous review already addressed should be checked against it.
+    """
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+    return _paginate(url, _github_headers(token))
+
+
+_MAX_CONVERSATION_CHARS = 6000
+_MAX_CONVERSATION_ITEM_CHARS = 800
+
+
+def build_conversation_context(
+    comments: list[dict],
+    reviews: list[dict] | None = None,
+    max_total_chars: int = _MAX_CONVERSATION_CHARS,
+    max_item_chars: int = _MAX_CONVERSATION_ITEM_CHARS,
+) -> str:
+    """Format PR conversation comments + review summaries for specialist context.
+
+    Returns chronologically-ordered, truncated plain text — empty string if
+    there's nothing to show. Items are dropped (not further truncated) once
+    the total budget is exhausted, with a note of how many were omitted, so
+    the most recent thread activity is always preserved in favor of older
+    entries when a PR has an unusually long history.
+    """
+    items: list[tuple[str, str, str, str]] = []  # (timestamp, author, body, kind)
+
+    for c in comments:
+        body = (c.get("body") or "").strip()
+        if not body:
+            continue
+        items.append((
+            c.get("created_at", ""),
+            c.get("user", {}).get("login", "unknown"),
+            body,
+            "comment",
+        ))
+
+    for r in reviews or []:
+        body = (r.get("body") or "").strip()
+        if not body:
+            continue
+        state = (r.get("state") or "").lower()
+        items.append((
+            r.get("submitted_at", ""),
+            r.get("user", {}).get("login", "unknown"),
+            body,
+            f"review:{state}" if state else "review",
+        ))
+
+    if not items:
+        return ""
+
+    items.sort(key=lambda item: item[0])
+
+    # Fill the budget from most recent backwards, so a long thread keeps its
+    # latest activity (where a claim is most likely to have been contradicted
+    # or resolved) instead of losing it to older entries filling the quota.
+    kept: list[str] = []
+    total = 0
+    omitted = 0
+    for created_at, author, body, kind in reversed(items):
+        if len(body) > max_item_chars:
+            body = body[:max_item_chars] + " …[truncated]"
+        entry = f"**{author}** ({kind}, {created_at}):\n{body}"
+        if total + len(entry) > max_total_chars:
+            omitted += 1
+            continue
+        kept.append(entry)
+        total += len(entry)
+
+    entries = list(reversed(kept))
+    if omitted:
+        entries.insert(0, f"…[{omitted} earlier thread item(s) omitted for length]")
+
+    return "\n\n---\n\n".join(entries)
+
+
 def get_last_reviewed_sha(owner: str, repo: str, pr_number: int, token: str) -> str | None:
     """Find the most recent Vigil review and return its commit SHA."""
     reviews = fetch_vigil_reviews(owner, repo, pr_number, token)

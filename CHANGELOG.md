@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **PR conversation context** — Specialists and the lead reviewer now receive the PR's conversation thread (issue comments, bot replies, prior review bodies) alongside the diff, not just the diff itself. A shared "FACTUAL CLAIMS VS. THREAD EVIDENCE" instruction (specialists) and scope-check bullet (lead) direct reviewers to flag a `factual-accuracy` finding when the diff/description asserts something the thread already contradicts — e.g. a doc change claiming "X was never connected" when a bot reply in the same thread says otherwise. Fixes the class of failure in #2698 (LunaOS) where a diff-only review approved a PR whose central factual claim was contradicted in its own comment thread.
 - **Webhook server** — `vigil serve` starts a FastAPI server that receives GitHub webhook events and triggers reviews automatically. No more GitHub Actions minutes burned. Configure with `WEBHOOK_SECRET` for signature verification.
 - **Non-blocking specialists** — Personas can be marked `blocking=False` (Security is non-blocking by default during early dev). Their findings become observations and don't block the review decision.
 - **Email alerts** — Personas with `alert=True` trigger email notifications for their findings. Security findings send alerts even though they're non-blocking. Configure with `VIGIL_ALERT_EMAIL` and SMTP env vars.

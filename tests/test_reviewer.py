@@ -6,7 +6,13 @@ from unittest.mock import patch, MagicMock
 
 from vigil.models import Finding, PersonaVerdict, ReviewResult, Severity
 from vigil.personas import Persona, ReviewProfile
-from vigil.reviewer import _parse_json_response, _parse_findings, _is_transient_llm_error, review_diff
+from vigil.reviewer import (
+    _build_pr_context_block,
+    _is_transient_llm_error,
+    _parse_findings,
+    _parse_json_response,
+    review_diff,
+)
 
 
 # ---------- _parse_json_response ----------
@@ -53,6 +59,35 @@ class TestParseFindings:
                 "category": "test", "message": "msg"}]
         findings = _parse_findings(raw)
         assert findings[0].line is None
+
+
+# ---------- _build_pr_context_block ----------
+
+class TestBuildPrContextBlock:
+
+    def _pr_context(self, **overrides):
+        base = {
+            "title": "Test PR", "author": "user", "head": "feature",
+            "base": "main", "additions": 10, "deletions": 5,
+            "changed_files": 1, "body": "Test",
+        }
+        base.update(overrides)
+        return base
+
+    def test_omits_conversation_section_when_absent(self):
+        block = _build_pr_context_block("diff", self._pr_context())
+        assert "PR Conversation" not in block
+
+    def test_omits_conversation_section_when_empty_string(self):
+        block = _build_pr_context_block("diff", self._pr_context(conversation=""))
+        assert "PR Conversation" not in block
+
+    def test_includes_conversation_section_when_present(self):
+        convo = "**codex-bot** (comment, 2026-07-15T10:00:00Z):\nYour team has set up Codex to review pull requests."
+        block = _build_pr_context_block("diff", self._pr_context(conversation=convo))
+        assert "PR Conversation" in block
+        assert "codex-bot" in block
+        assert "treat it as evidence" in block
 
 
 # ---------- Non-blocking persona logic in review_diff ----------
@@ -375,6 +410,32 @@ class TestTransientSpecialistErrors:
         assert "Observations:" in lead_prompt
         assert "review skipped" in lead_prompt.lower()
         assert "No findings." in lead_prompt
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_conversation_reaches_specialist_and_lead_prompts(self, mock_llm, mock_alerts):
+        """pr_context['conversation'] should flow into both specialist and lead prompts."""
+        mock_alerts.return_value = 0
+        specialist_json = json.dumps({"decision": "APPROVE", "findings": [], "observations": []})
+        specialist_resp = MagicMock()
+        specialist_resp.choices = [MagicMock(message=MagicMock(content=specialist_json))]
+        lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
+        lead_resp = MagicMock()
+        lead_resp.choices = [MagicMock(message=MagicMock(content=lead_json))]
+        mock_llm.side_effect = [specialist_resp, lead_resp]
+
+        profile = self._make_profile()
+        pr_context = self._pr_context()
+        pr_context["conversation"] = (
+            "**codex-bot** (comment, 2026-07-15T10:00:00Z):\n"
+            "Your team has set up Codex to review pull requests in this repo."
+        )
+        review_diff("diff --git a/a.py b/a.py\n", pr_context, profile)
+
+        specialist_prompt = mock_llm.call_args_list[0].kwargs["messages"][1]["content"]
+        lead_prompt = mock_llm.call_args_list[1].kwargs["messages"][1]["content"]
+        assert "codex-bot" in specialist_prompt
+        assert "codex-bot" in lead_prompt
 
 
 class TestDocumentationOnlyAutoApprove:

@@ -121,6 +121,19 @@ def _build_pr_context_block(diff: str, pr_context: dict, file_summary: str = "")
 {file_summary}
 ```
 """
+    conversation_section = ""
+    conversation = pr_context.get("conversation") or ""
+    if conversation:
+        conversation_section = f"""
+### PR Conversation (comments, bot replies, prior reviews)
+This is what has ALREADY BEEN SAID in this PR's thread — treat it as evidence,
+not code. If the diff, description, or a doc/plan change asserts something as
+fact that this conversation contradicts, that is a finding (category
+"factual-accuracy") even if the code itself is otherwise correct.
+```
+{conversation}
+```
+"""
     return f"""## PR: {pr_context['title']}
 
 **Author:** {pr_context['author']}
@@ -129,7 +142,7 @@ def _build_pr_context_block(diff: str, pr_context: dict, file_summary: str = "")
 
 ### Description
 {pr_context.get('body') or 'No description provided.'}
-{summary_section}
+{summary_section}{conversation_section}
 ### Diff (files relevant to your domain)
 ```diff
 {diff}
@@ -249,6 +262,10 @@ def review_diff(
     Args:
         diff: Raw unified diff text.
         pr_context: Dict with PR metadata (title, author, head, base, etc.).
+            An optional "conversation" key (str, from comment_manager.build_
+            conversation_context) is included in every specialist and lead
+            prompt so factual claims in the diff can be cross-checked against
+            the PR's comment thread and prior reviews.
         profile: The ReviewProfile containing specialists and lead prompt.
         model: LLM model identifier for specialists (default: gemini/gemini-2.5-flash).
         lead_model: Optional separate model for the lead reviewer.
