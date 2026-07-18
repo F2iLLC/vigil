@@ -131,7 +131,7 @@ vigil decisions F2iProject/vigil --file src/auth.py
 vigil decisions F2iProject/vigil --remove 5
 
 # Start webhook server on port 9000
-vigil serve --port 9000 -m gemini/gemini-2.5-flash
+vigil serve --port 9000 -m gemini/gemini-3.1-flash-lite
 ```
 
 ## Auto-Issue Creation
