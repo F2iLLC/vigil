@@ -66,7 +66,7 @@ That's it. Vigil fetches the PR, runs all specialists, and posts a review with i
 vigil review <PR_URL> [OPTIONS]
 
 Options:
-  -m, --model TEXT        LLM model (default: gemini/gemini-2.5-flash)
+  -m, --model TEXT        LLM model (default: gemini/gemini-3.1-flash-lite)
   --lead-model TEXT       Different model for the lead reviewer
   -p, --profile TEXT      Review profile: default, enterprise
   --json                  Output raw JSON instead of pretty-printing
@@ -182,7 +182,7 @@ vigil decisions owner/repo --clear
 Deploy Vigil as a webhook to auto-review PRs:
 
 ```bash
-vigil serve --port 8000 -m gemini/gemini-2.5-flash
+vigil serve --port 8000 -m gemini/gemini-3.1-flash-lite
 ```
 
 The server listens for GitHub webhook events:
@@ -251,8 +251,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          vigil review "${{ github.event.pull_request.html_url }}" \
-            --model "gemini/gemini-2.5-flash" --post
+            vigil review "${{ github.event.pull_request.html_url }}" \
+            --model "gemini/gemini-3.1-flash-lite" --post
 ```
 
 ### Reusable action
@@ -260,7 +260,7 @@ jobs:
 ```yaml
 - uses: F2iLLC/vigil@v1
   with:
-    model: "gemini/gemini-2.5-flash"
+    model: "gemini/gemini-3.1-flash-lite"
     profile: "default"
     gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
 ```
@@ -305,8 +305,8 @@ Anything [litellm supports](https://docs.litellm.ai/docs/providers):
 
 ```bash
 # Google
-vigil review $PR -m gemini/gemini-2.5-flash
-vigil review $PR -m gemini/gemini-2.5-pro
+vigil review $PR -m gemini/gemini-3.1-flash-lite
+vigil review $PR -m gemini/gemini-3.1-pro
 
 # Anthropic
 vigil review $PR -m claude-sonnet-4-6

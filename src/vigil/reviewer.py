@@ -245,7 +245,7 @@ def review_diff(
     diff: str,
     pr_context: dict,
     profile: ReviewProfile,
-    model: str = "gemini/gemini-2.5-flash",
+    model: str = "gemini/gemini-3.1-flash-lite",
     lead_model: str | None = None,
     on_specialist_done: Callable[[PersonaVerdict], None] | None = None,
     repo_key: str = "",
@@ -267,7 +267,7 @@ def review_diff(
             prompt so factual claims in the diff can be cross-checked against
             the PR's comment thread and prior reviews.
         profile: The ReviewProfile containing specialists and lead prompt.
-        model: LLM model identifier for specialists (default: gemini/gemini-2.5-flash).
+        model: LLM model identifier for specialists (default: gemini/gemini-3.1-flash-lite).
         lead_model: Optional separate model for the lead reviewer.
         on_specialist_done: Optional callback invoked after each specialist finishes.
         repo_key: Repository in "owner/repo" format. When provided, findings are
