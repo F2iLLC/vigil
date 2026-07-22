@@ -32,7 +32,7 @@ Each specialist only sees the files relevant to their domain (Security skips `.m
 - **Model-agnostic** — runs on any LLM via [litellm](https://github.com/BerriAI/litellm) (Gemini, Claude, GPT, Mistral, local models, etc.)
 - **Multi-persona review** — 6 specialist reviewers + lead, each with domain-scoped expertise
 - **Inline PR comments** — findings posted directly on the diff lines, not buried in a wall of text
-- **Auto-issue creation** — non-blocking observations are opened as GitHub issues with a `vigil` label and cited as links in the review
+- **Auto-issue creation** — non-blocking observations are opened as GitHub issues with a priority label matching their severity and cited as links in the review
 - **Decision log** — remembers acknowledged findings so Vigil stops re-flagging them; browse and manage via `vigil decisions`
 - **Non-blocking personas** — Security runs as non-blocking by default (findings become observations, never block the PR)
 - **Email alerts** — alert-enabled personas can send email notifications for findings via SMTP
@@ -138,8 +138,8 @@ vigil serve --port 9000 -m gemini/gemini-3.1-flash-lite
 
 When `--post` is used, Vigil automatically creates GitHub issues for non-blocking observations:
 
-1. Each observation becomes an issue labeled `vigil` with severity, file location, message, and suggestion
-2. Existing open `vigil` issues are checked first to avoid duplicates (file path + message similarity matching)
+1. Each observation becomes an issue labeled `Critical Priority`, `High Priority`, `Medium Priority`, or `Low Priority`, matching its severity
+2. Existing open Vigil-created issues are checked first to avoid duplicates (file path + message similarity matching)
 3. The review body shows compact issue links instead of raw text:
 
 ```
