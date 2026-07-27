@@ -1,0 +1,197 @@
+name: Reusable Vigil PR Review
+
+on:
+  workflow_call:
+    inputs:
+      model:
+        description: LLM model for specialists
+        required: false
+        type: string
+        default: gemini/gemini-3.1-flash-lite
+      lead-model:
+        description: Optional separate model for the lead reviewer
+        required: false
+        type: string
+        default: ""
+      profile:
+        description: Review profile
+        required: false
+        type: string
+        default: default
+      runner-json:
+        description: JSON array passed to runs-on
+        required: false
+        type: string
+        default: '["ubuntu-latest"]'
+      advisory:
+        description: Keep provider or review failures advisory
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      GEMINI_API_KEY:
+        required: false
+      ANTHROPIC_API_KEY:
+        required: false
+      OPENAI_API_KEY:
+        required: false
+      VIGIL_REVIEW_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 20
+    concurrency:
+      group: vigil-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
+      cancel-in-progress: true
+    if: >-
+      vars.SKIP_VIGIL != 'true' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-vigil') &&
+      !contains(github.event.issue.labels.*.name, 'skip-vigil') &&
+      !contains(github.event.pull_request.title || github.event.issue.title || '', '[skip vigil]') &&
+      (
+        (
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.draft == false &&
+          github.actor != 'dependabot[bot]'
+        ) || (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          contains(github.event.comment.body, '/vigil review')
+        )
+      )
+    steps:
+      - name: Determine PR URL
+        id: pr
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            echo "url=${{ github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "url=${{ github.event.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check review provider key
+        id: provider
+        shell: bash
+        env:
+          MODEL: ${{ inputs.model }}
+          LEAD_MODEL: ${{ inputs.lead-model }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          missing=()
+
+          check_model_key() {
+            local selected_model="$1"
+            case "$selected_model" in
+              gemini/*)
+                [ -n "$GEMINI_API_KEY" ] || missing+=("GEMINI_API_KEY")
+                ;;
+              claude-*|anthropic/*)
+                [ -n "$ANTHROPIC_API_KEY" ] || missing+=("ANTHROPIC_API_KEY")
+                ;;
+              gpt-*|o[0-9]-*|openai/*)
+                [ -n "$OPENAI_API_KEY" ] || missing+=("OPENAI_API_KEY")
+                ;;
+            esac
+          }
+
+          check_model_key "$MODEL"
+          if [ -n "$LEAD_MODEL" ] && [ "$LEAD_MODEL" != "$MODEL" ]; then
+            check_model_key "$LEAD_MODEL"
+          fi
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            printf -v missing_list '%s, ' "${missing[@]}"
+            echo "::warning::Skipping Vigil review: ${missing_list%, } is not configured for the selected model(s)."
+          fi
+
+      - name: Check approval credential
+        if: steps.provider.outputs.has_key == 'true'
+        shell: bash
+        env:
+          VIGIL_REVIEW_TOKEN: ${{ secrets.VIGIL_REVIEW_TOKEN }}
+        run: |
+          if [ -z "$VIGIL_REVIEW_TOKEN" ]; then
+            echo "::warning::VIGIL_REVIEW_TOKEN is not configured. GitHub may reject APPROVE/REQUEST_CHANGES and Vigil will fall back to a COMMENT review."
+          fi
+
+      # Pin the composite action independently from this reusable workflow.
+      # Update this one reference when a reviewed Vigil implementation lands.
+      - uses: F2iLLC/vigil@fd918eb1d2dbaa16cbecc424aa17ba23002e6685
+        if: steps.provider.outputs.has_key == 'true'
+        continue-on-error: ${{ inputs.advisory }}
+        with:
+          pr-url: ${{ steps.pr.outputs.url }}
+          model: ${{ inputs.model }}
+          lead-model: ${{ inputs.lead-model }}
+          profile: ${{ inputs.profile }}
+          gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          github-token: ${{ secrets.VIGIL_REVIEW_TOKEN || github.token }}
+
+  dismiss:
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 10
+    if: >-
+      (
+        github.event_name == 'pull_request_review_comment' &&
+        (
+          contains(github.event.comment.body, 'resolved') ||
+          contains(github.event.comment.body, 'Resolved') ||
+          contains(github.event.comment.body, 'fixed') ||
+          contains(github.event.comment.body, 'Fixed') ||
+          contains(github.event.comment.body, 'addressed') ||
+          contains(github.event.comment.body, 'Addressed') ||
+          contains(github.event.comment.body, 'done') ||
+          contains(github.event.comment.body, 'Done')
+        )
+      ) || (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        !contains(github.event.comment.body, '/vigil review') &&
+        (
+          contains(github.event.comment.body, 'resolved') ||
+          contains(github.event.comment.body, 'Resolved')
+        )
+      )
+    steps:
+      - name: Determine PR URL
+        id: pr
+        shell: bash
+        run: |
+          echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+
+      - uses: F2iLLC/vigil@fd918eb1d2dbaa16cbecc424aa17ba23002e6685
+        continue-on-error: ${{ inputs.advisory }}
+        with:
+          pr-url: ${{ steps.pr.outputs.url }}
+          command: dismiss-resolved
+
+  resolve-addressed:
+    runs-on: ${{ fromJSON(inputs.runner-json) }}
+    timeout-minutes: 10
+    if: >-
+      vars.SKIP_VIGIL != 'true' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-vigil') &&
+      !contains(github.event.pull_request.title || '', '[skip vigil]') &&
+      github.event_name == 'pull_request' &&
+      github.event.action == 'synchronize' &&
+      github.event.pull_request.draft == false
+    steps:
+      - uses: F2iLLC/vigil@fd918eb1d2dbaa16cbecc424aa17ba23002e6685
+        continue-on-error: ${{ inputs.advisory }}
+        with:
+          command: resolve-addressed
