@@ -1,356 +1,436 @@
 # Vigil
 
-AI-powered, model-agnostic PR review with multi-persona specialist teams.
+AI-powered, model-agnostic pull-request review with domain-specialist teams.
 
-Vigil dispatches your pull request to a team of specialist reviewers — each focused on a single domain (security, logic, performance, etc.) — then a lead reviewer aggregates their verdicts into a final decision. Findings land as **inline PR comments** on the exact lines that need attention. Non-blocking observations are automatically opened as **GitHub issues** and linked in the review.
+Vigil routes a PR diff to focused reviewers, asks a lead reviewer to synthesize their verdicts, posts actionable findings on the relevant diff lines, and can track non-blocking follow-up work as GitHub issues.
+
+> [!IMPORTANT]
+> This README documents `main`. The published `v1.0.0` release and `v1` action tag date from March 2026 and do not include the current review lifecycle, model default, or action hardening. The reusable workflow below follows the reviewed implementation centrally. If you call the composite action directly, use the pinned commit shown here instead of `@v1`.
 
 ## How it works
 
-```
-PR Diff
-  │
-  ├─► Logic ──────────► findings
-  ├─► Security ───────► observations (non-blocking)
-  ├─► Architecture ───► findings
-  ├─► Testing ────────► findings
-  ├─► Performance ────► findings
-  └─► DX ─────────────► findings
-                            │
-                    Lead Reviewer
-                            │
-                  ┌─────────┴─────────┐
-                  │  APPROVE / BLOCK  │
-                  │  + inline comments│
-                  │  + issue links    │
-                  └───────────────────┘
+```text
+PR diff + description + conversation history
+                    |
+       domain-routed specialists
+  Logic | Security | Architecture
+  Testing | Performance | DX
+                    |
+        lead reviewer synthesis
+                    |
+   APPROVE / REQUEST_CHANGES / BLOCK
+        |                       |
+ inline findings       actionable observations
+                        tracked as GitHub issues
 ```
 
-Each specialist only sees the files relevant to their domain (Security skips `.md` files, Testing focuses on test files + source, etc.). This keeps prompts focused and reduces token waste.
+Each specialist receives only the files relevant to its domain. Security skips documentation, Testing sees tests and related source, and data/GxP reviewers activate only for relevant files in the enterprise profile.
 
 ## Features
 
-- **Model-agnostic** — runs on any LLM via [litellm](https://github.com/BerriAI/litellm) (Gemini, Claude, GPT, Mistral, local models, etc.)
-- **Multi-persona review** — 6 specialist reviewers + lead, each with domain-scoped expertise
-- **Inline PR comments** — findings posted directly on the diff lines, not buried in a wall of text
-- **Auto-issue creation** — non-blocking observations are opened as GitHub issues with a priority label matching their severity and cited as links in the review
-- **Decision log** — remembers acknowledged findings so Vigil stops re-flagging them; browse and manage via `vigil decisions`
-- **Non-blocking personas** — Security runs as non-blocking by default (findings become observations, never block the PR)
-- **Email alerts** — alert-enabled personas can send email notifications for findings via SMTP
-- **Webhook server** — deploy as a GitHub webhook to auto-review PRs on open/reopen
-- **Incremental review** — only reviews files changed since the last Vigil review
-- **Smart deduplication** — won't repost findings already on the PR (even in resolved threads)
-- **File-level routing** — each specialist only reviews files matching their domain patterns
-- **Session IDs** — every specialist verdict is tagged with a unique ID (`VGL-a3f8b2`) for traceability
-- **Structured output** — JSON mode with typed findings (severity, category, file, line, suggestion)
-- **Built-in profiles** — `default` for general-purpose, `enterprise` for regulated/medtech (adds GxP, Data Architecture, tenant isolation)
-- **GitHub Action** — drop into any repo's CI with 4 lines of YAML
+- **Model-agnostic review** through [LiteLLM](https://github.com/BerriAI/litellm).
+- **Six default specialists plus a lead**, with a seven-specialist enterprise profile for regulated systems.
+- **Inline findings** relocated to a valid changed line when the model cites an un-commentable location.
+- **Actionable observation gate** that rejects model-generated praise or notes without a concrete follow-up action.
+- **Automatic issue tracking** for non-blocking observations, with severity-matched priority labels and open-issue deduplication.
+- **PR conversation context** so specialists and the lead can check claims against top-level comments and prior review bodies.
+- **Documentation-only fast path** that approves recognized docs-only diffs without calling a model.
+- **Cross-specialist consensus** that merges duplicate findings into one comment with specialist attribution.
+- **Cross-round deduplication** against active and resolved Vigil comments.
+- **Defensive output handling** that validates structured model responses and sanitizes model-generated Markdown before posting.
+- **Decision log** that suppresses acknowledged, accepted, wontfix, or false-positive patterns.
+- **Review lifecycle commands** for dismissing resolved findings and auto-resolving threads whose code changed.
+- **Transient-provider handling** that retries recoverable rate-limit, timeout, and service-unavailable errors without treating infrastructure noise as a code defect.
+- **Alert delivery** through SMTP and an optional LunaOS escalation webhook.
+- **CLI, composite action, reusable workflow, and webhook server** integration options.
+
+## Installation
+
+Vigil requires Python 3.10 or newer.
+
+For local development:
+
+```bash
+git clone https://github.com/F2iLLC/vigil.git
+cd vigil
+python -m venv .venv
+python -m pip install -e .
+```
+
+Install the webhook dependencies when using `vigil serve`:
+
+```bash
+python -m pip install -e ".[webhook]"
+```
+
+For a pinned CLI installation without cloning:
+
+```bash
+python -m pip install "git+https://github.com/F2iLLC/vigil.git@fd918eb1d2dbaa16cbecc424aa17ba23002e6685"
+```
 
 ## Quick start
 
 ```bash
-pip install -e .
-```
-
-```bash
 export GITHUB_TOKEN="ghp_..."
-export GEMINI_API_KEY="..."  # or ANTHROPIC_API_KEY, OPENAI_API_KEY, etc.
+export GEMINI_API_KEY="..."
 
 vigil review https://github.com/owner/repo/pull/123 --post
 ```
 
-That's it. Vigil fetches the PR, runs all specialists, and posts a review with inline comments. Observations are auto-opened as GitHub issues and linked in the review body.
+`GITHUB_TOKEN` must be able to read the PR. Posting reviews and issues also requires pull-request and issue write access.
 
-### CLI commands
+## CLI
 
-```
+### Review a PR
+
+```text
 vigil review <PR_URL> [OPTIONS]
 
 Options:
-  -m, --model TEXT        LLM model (default: gemini/gemini-3.1-flash-lite)
-  --lead-model TEXT       Different model for the lead reviewer
-  -p, --profile TEXT      Review profile: default, enterprise
-  --json                  Output raw JSON instead of pretty-printing
-  --post                  Post review as GitHub PR review with inline comments
+  -m, --model TEXT      Specialist model
+                        Default: gemini/gemini-3.1-flash-lite
+  --lead-model TEXT     Optional separate lead-reviewer model
+  -p, --profile TEXT    default or enterprise
+  --json                Print the structured result
+  --post                Post the result to GitHub
 ```
 
-```
-vigil dismiss-resolved <PR_URL>
-```
-
-Resolve Vigil comment threads that received a "resolved" reply. Also logs the decision so the finding pattern is suppressed in future reviews.
-
-```
-vigil decisions <owner/repo> [OPTIONS]
-
-Options:
-  -f, --file TEXT         Filter by file path
-  -c, --category TEXT     Filter by category
-  --remove INT            Remove a specific decision by ID (re-enables that pattern)
-  --clear                 Clear all decisions for the repo
-```
-
-Browse, filter, and manage the decision log. See what Vigil is suppressing, why each finding was dismissed, and selectively re-enable patterns as the repo matures.
-
-```
-vigil serve [OPTIONS]
-
-Options:
-  -p, --port INT          Port to listen on (default: 8000)
-  --host TEXT             Host to bind to (default: 0.0.0.0)
-  -m, --model TEXT        LLM model for reviews
-  --lead-model TEXT       LLM model for lead reviewer
-  --profile TEXT          Review profile
-```
-
-Start the webhook server to auto-review PRs when they are opened, reopened, or marked ready for review.
-
-```
-vigil profiles
-```
-
-List available review profiles and their specialists.
-
-### Examples
+Examples:
 
 ```bash
-# Use Gemini Flash (fast + cheap)
-vigil review https://github.com/org/repo/pull/## -m gemini/gemini-3.1-flash-lite --post
+# Default Gemini model
+vigil review https://github.com/org/repo/pull/123 --post
 
-# Use Claude for lead, Gemini for specialists
-vigil review https://github.com/org/repo/pull/## -m gemini/gemini-3.1-flash-lite --lead-model claude-sonnet-4-6 --post
+# Gemini specialists with a Claude lead
+vigil review https://github.com/org/repo/pull/123 \
+  --model gemini/gemini-3.1-flash-lite \
+  --lead-model claude-sonnet-4-6 \
+  --post
 
-# Enterprise profile (adds GxP, Data Architecture, tenant isolation reviewers)
-vigil review https://github.com/org/repo/pull/## -p enterprise --post
+# Regulated-system profile
+vigil review https://github.com/org/repo/pull/123 --profile enterprise --post
 
-# JSON output for piping into other tools
-vigil review https://github.com/org/repo/pull/## --json
-
-# Browse decision log
-vigil decisions F2iProject/vigil
-vigil decisions F2iProject/vigil --file src/auth.py
-vigil decisions F2iProject/vigil --remove 5
-
-# Start webhook server on port 9000
-vigil serve --port 9000 -m gemini/gemini-3.1-flash-lite
+# Machine-readable output without posting
+vigil review https://github.com/org/repo/pull/123 --json
 ```
 
-## Auto-Issue Creation
-
-When `--post` is used, Vigil automatically creates GitHub issues for non-blocking observations:
-
-1. Each observation becomes an issue labeled `Critical Priority`, `High Priority`, `Medium Priority`, or `Low Priority`, matching its severity
-2. Existing open Vigil-created issues are checked first to avoid duplicates (file path + message similarity matching)
-3. The review body shows compact issue links instead of raw text:
-
-```
-### Observations (3 non-blocking → tracked as issues)
-- 🟡 [MEDIUM] `src/auth.py:42` — Missing input validation → #12
-- 🔵 [LOW] `src/db.py:18` — Connection not pooled → #13
-- 🟡 [MEDIUM] `src/api.py:5` — Error leaks stack trace → already tracked in #8
-```
-
-## Decision Log
-
-Vigil remembers findings you've already acknowledged so it doesn't keep flagging the same patterns:
-
-**How decisions get logged:**
-
-- Reply "resolved", "fixed", "addressed", or "done" to a Vigil inline comment
-- Vigil captures the reply text as the reason and the author as `decided_by`
-- Decision type is inferred: "false positive" → `false_positive`, "wontfix"/"acceptable" → `wontfix`, everything else → `accepted`
-
-**How decisions suppress findings:**
-
-- Before each review, findings are checked against the decision log by (repo, file, category) + fuzzy message matching (≥85% similarity)
-- Matching findings are silently suppressed
-
-**Managing decisions:**
+### Resolve acknowledged findings
 
 ```bash
-# See what's suppressed and why
+vigil dismiss-resolved https://github.com/owner/repo/pull/123
+```
+
+This resolves Vigil threads that received a resolution reply and records the decision for future suppression. Recognized replies include `resolved`, `fixed`, `addressed`, `done`, and issue-link replies that cover the finding.
+
+### Resolve findings addressed by code changes
+
+```bash
+vigil resolve-addressed https://github.com/owner/repo/pull/123
+```
+
+This compares the current head with the last Vigil-reviewed commit and resolves Vigil threads whose cited file and line changed. In a pull-request GitHub Actions event, the composite action can auto-detect the PR URL.
+
+### Browse the decision log
+
+```bash
 vigil decisions owner/repo
-
-# Re-enable a pattern (repo has matured, time to catch these again)
+vigil decisions owner/repo --file src/auth.py
+vigil decisions owner/repo --category security
 vigil decisions owner/repo --remove 5
-
-# Nuclear option: clear everything
 vigil decisions owner/repo --clear
 ```
 
-## Webhook Server
-
-Deploy Vigil as a webhook to auto-review PRs:
+### List profiles
 
 ```bash
-vigil serve --port 8000 -m gemini/gemini-3.1-flash-lite
+vigil profiles
 ```
 
-The server listens for GitHub webhook events:
-
-- **PR opened/reopened/ready_for_review** → triggers a review
-- **`/vigil review` comment** → triggers an on-demand review
-- **Resolution replies** → resolves threads and logs decisions
-- Skips drafts and bot PRs
-
-Configure in GitHub: Settings → Webhooks → Add webhook → `http://your-host:8000/webhook`
-
-Optional: set `WEBHOOK_SECRET` for HMAC-SHA256 signature verification.
-
-## Email Alerts
-
-Alert-enabled personas (like Security) can send email notifications when findings are detected:
+### Run the webhook server
 
 ```bash
-# .env
-VIGIL_ALERT_EMAIL=dev-team@company.com
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=vigil@company.com
-SMTP_PASSWORD=app-specific-password
+vigil serve \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --model gemini/gemini-3.1-flash-lite \
+  --profile default
 ```
 
-Alongside email, the same findings are also POSTed to LunaOS's escalation-gate
-webhook (`/api/escalations`), which fans them out to Telegram. This is
-additive — email alerting works the same whether or not the webhook is
-configured.
+## Review lifecycle
 
-```bash
-# .env
-LUNAOS_ESCALATION_URL=https://hetzner-api.lunaos.io/api/escalations
-ESCALATION_INGEST_TOKEN=shared-secret-token
-```
+Vigil reviews the full PR diff against the base branch. On a posted re-review it also:
 
-Leave `LUNAOS_ESCALATION_URL` unset to disable the escalation webhook.
+1. Locates the most recent Vigil review commit.
+2. Resolves threads with accepted resolution replies.
+3. Checks whether the PR head changed; if no files changed, it skips the duplicate review.
+4. Resolves threads whose cited code changed.
+5. Re-reviews the **full PR diff**, not only the latest commit or changed-file subset.
+6. Filters findings already covered by active or resolved Vigil comments.
 
-## GitHub Action
+This distinction matters: incremental state controls skipping, thread resolution, and deduplication, while the model still receives the complete PR change.
 
-### Drop-in workflow (for your own repo)
+### Documentation-only PRs
+
+If every changed file is recognized as documentation—Markdown, RST, text, common README/CHANGELOG/LICENSE files, `docs/`, `documentation/`, or GitHub templates—Vigil returns an approval without calling the specialist or lead models.
+
+### PR conversation evidence
+
+Vigil fetches top-level PR comments and prior review bodies and supplies a bounded version of that conversation to every specialist and the lead. Reviewers are instructed to flag factual claims in the diff or description when the existing thread contradicts them.
+
+### Cross-specialist consensus
+
+When multiple specialists report the same file/category/message concern at overlapping lines, Vigil emits one finding and includes a consensus table showing which specialists raised it and their verdicts.
+
+## Observations and automatic issues
+
+With `--post`, non-blocking observations can become GitHub issues:
+
+1. Model-generated observations must include a concrete, non-null suggestion. Compliments, descriptions, and no-action notes are discarded.
+2. Vigil ensures a priority label exists for the observation severity: `Critical Priority`, `High Priority`, `Medium Priority`, or `Low Priority`.
+3. Open Vigil-created issues are checked for the same file and a sufficiently similar message before a new issue is created.
+4. The final review links each tracked observation to its issue.
+
+Security is non-blocking in both built-in profiles. Its findings become observations and do not change the overall review decision, but they can still be tracked and alerted.
+
+## Decision log
+
+Vigil stores acknowledged finding patterns in `~/.vigil/decisions.db`.
+
+- Matching uses repository, file, category, and fuzzy message similarity.
+- Resolution replies record the reply author and reason.
+- Replies containing `false positive` are recorded as `false_positive`.
+- Replies containing `wontfix` or `acceptable` are recorded as `wontfix`.
+- Other accepted resolution replies are recorded as `accepted`.
+- `--remove` re-enables one pattern; `--clear` removes all stored decisions for a repository.
+
+## GitHub Actions
+
+### Approval credential
+
+The workflow token and the review identity are separate concerns:
+
+- `github.token` can read the PR and usually post comments.
+- GitHub may reject `APPROVE` or `REQUEST_CHANGES` events from `github.token`, depending on repository/organization settings and identity rules.
+- When that happens, Vigil falls back to a `COMMENT` review. The content is preserved, but it cannot satisfy a required-approval branch rule.
+- Configure `VIGIL_REVIEW_TOKEN` as a repository or organization secret when Vigil must submit a real review decision. Use a fine-grained PAT or GitHub App token for a dedicated reviewer identity with **Pull requests: Read and write** access to the target repositories.
+
+The reusable workflow emits a visible warning when `VIGIL_REVIEW_TOKEN` is absent.
+
+### Central reusable workflow
+
+Do not symlink workflow files across repositories. A Git symlink to a path outside the repository breaks on GitHub runners and on other clones.
+
+Use the reusable workflow instead. Each repository keeps this small caller:
 
 ```yaml
-# .github/workflows/vigil-review.yml
+# .github/workflows/vigil.yml
 name: Vigil PR Review
+
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: read
   pull-requests: write
-  issues: write # needed for auto-issue creation
+  issues: write
 
 jobs:
-  review:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install vigil-review
-      - env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-            vigil review "${{ github.event.pull_request.html_url }}" \
-            --model "gemini/gemini-3.1-flash-lite" --post
+  vigil:
+    uses: F2iLLC/vigil/.github/workflows/reusable-vigil.yml@main
+    with:
+      # Omit this input to use ubuntu-latest.
+      runner-json: '["self-hosted","linux","x64","ci-light"]'
+    secrets: inherit
 ```
 
-### Reusable action
+The caller follows `main` so reviewed workflow fixes propagate to every consumer without copying the full YAML. If immutable workflow provenance is more important than automatic propagation, replace `@main` with a full commit SHA and update that pin intentionally.
+
+The centralized workflow provides:
+
+- reviews on PR open, synchronize, reopen, and ready-for-review;
+- `/vigil review` on-demand reviews;
+- resolution-reply handling;
+- `resolve-addressed` on new commits;
+- per-PR concurrency cancellation;
+- `SKIP_VIGIL=true`, `skip-vigil`, and `[skip vigil]` controls;
+- model-aware provider-key checks;
+- approval-token warnings; and
+- an advisory mode that keeps provider outages from turning into red CI by default.
+
+Set these repository or organization secrets:
+
+| Secret | Required when | Purpose |
+| --- | --- | --- |
+| `GEMINI_API_KEY` | Using `gemini/*` | Specialist and lead model calls |
+| `ANTHROPIC_API_KEY` | Using `claude-*` or `anthropic/*` | Specialist or lead model calls |
+| `OPENAI_API_KEY` | Using OpenAI models | Specialist or lead model calls |
+| `VIGIL_REVIEW_TOKEN` | Real approval events are required | Submit APPROVE/REQUEST_CHANGES as the reviewer identity |
+
+Repository secrets are not exposed to untrusted fork pull requests under the normal `pull_request` event. Choose a fork-review policy deliberately; do not switch to `pull_request_target` without reviewing the security implications.
+
+### Direct composite-action use
+
+If the centralized lifecycle is unnecessary, call the composite action directly:
 
 ```yaml
-- uses: F2iLLC/vigil@v1
+- uses: F2iLLC/vigil@fd918eb1d2dbaa16cbecc424aa17ba23002e6685
   with:
-    model: "gemini/gemini-3.1-flash-lite"
-    profile: "default"
+    model: gemini/gemini-3.1-flash-lite
+    profile: default
     gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
+    github-token: ${{ secrets.VIGIL_REVIEW_TOKEN || github.token }}
 ```
+
+Available inputs:
+
+| Input | Default | Notes |
+| --- | --- | --- |
+| `pr-url` | Event PR URL | Required for comment-triggered workflows |
+| `command` | `review` | `review`, `dismiss-resolved`, or `resolve-addressed` |
+| `model` | `gemini/gemini-3.1-flash-lite` | LiteLLM model identifier |
+| `lead-model` | Same as `model` | Optional separate lead model |
+| `profile` | `default` | `default` or `enterprise` |
+| `github-token` | `github.token` | Use `VIGIL_REVIEW_TOKEN` for real approval events |
+| `gemini-api-key` | Empty | Gemini provider credential |
+| `anthropic-api-key` | Empty | Anthropic provider credential |
+| `openai-api-key` | Empty | OpenAI provider credential |
+
+The action uses a suitable system Python 3.10+ when available and falls back to `actions/setup-python`. It installs Vigil into an isolated virtual environment under the runner temporary directory.
+
+## Webhook server
+
+Configure a GitHub webhook to send events to:
+
+```text
+https://your-host.example/webhook
+```
+
+The server handles:
+
+- `pull_request` opened, reopened, and ready-for-review events;
+- `/vigil review` top-level PR comments; and
+- top-level PR resolution comments.
+
+It skips drafts and bot-authored PRs. The standalone webhook server does not implement the GitHub Actions `synchronize`/`resolve-addressed` lifecycle.
+
+Set `WEBHOOK_SECRET` to verify `X-Hub-Signature-256` signatures. A health endpoint is available at `/health`.
+
+## Alerts
+
+Alert-enabled personas can send the same non-blocking findings through email and the optional LunaOS escalation endpoint.
+
+```bash
+# Email
+VIGIL_ALERT_EMAIL=dev-team@example.com
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=vigil@example.com
+SMTP_PASSWORD=app-specific-password
+
+# Optional LunaOS escalation delivery
+LUNAOS_ESCALATION_URL=https://hetzner-api.lunaos.io/api/escalations
+ESCALATION_INGEST_TOKEN=shared-secret-token
+```
+
+Both delivery paths are best-effort and additive. Leave their configuration unset to disable them.
 
 ## Profiles
 
-### `default` — 6 specialists + lead
+### `default`
 
-| Specialist       | Focus                                                    | Blocking                   |
-| ---------------- | -------------------------------------------------------- | -------------------------- |
-| **Logic**        | Bugs, off-by-one, null handling, race conditions         | Yes                        |
-| **Security**     | Injection, secrets, auth gaps, OWASP top 10              | No (observations → issues) |
-| **Architecture** | Coupling, API design, dependency direction               | Yes                        |
-| **Testing**      | Coverage gaps, brittle tests, missing error path tests   | Yes                        |
-| **Performance**  | N+1 queries, memory leaks, O(n²) on unbounded data       | Yes                        |
-| **DX**           | Breaking changes, missing docs, confusing error messages | Yes                        |
+| Specialist | Focus | Blocking |
+| --- | --- | --- |
+| Logic | Correctness, edge cases, concurrency | Yes |
+| Security | Validation, injection, secrets, auth | No |
+| Architecture | Boundaries, coupling, API design | Yes |
+| Testing | Coverage, assertions, error paths | Yes |
+| Performance | Queries, memory, rendering, bundle cost | Yes |
+| DX | API contracts, documentation, errors, migrations | Yes |
 
-Security runs as **non-blocking** by default — its findings become observations that are tracked as issues rather than blocking the PR. This is ideal for early-stage repos where security patterns aren't yet established. You can change this in `personas.py`.
+### `enterprise`
 
-### `enterprise` — 7 specialists + lead
+The enterprise profile is a separate seven-specialist team, not the default team plus two appended reviewers:
 
-Everything in `default`, plus:
+| Specialist | Focus | Blocking |
+| --- | --- | --- |
+| Architecture | Boundaries, lifecycle, observability, configuration | Yes |
+| Security | Validation, auth, secrets, tenant isolation | No |
+| Test Strategy | Coverage architecture and assertion quality | Yes |
+| Data Architecture | Schemas, migrations, indexes, ownership | Yes |
+| Performance | Queries, memory, rendering, bounded work | Yes |
+| DX | Public contracts, migrations, documentation | Yes |
+| GxP Compliance | Audit trails, ALCOA+, Part 11, immutability | Yes |
 
-| Specialist            | Focus                                                | Blocking |
-| --------------------- | ---------------------------------------------------- | -------- |
-| **Data Architecture** | Schema design, migrations, indexes, entity ownership | Yes      |
-| **GxP Compliance**    | Audit trails, ALCOA+, 21 CFR Part 11, immutability   | Yes      |
+## Review decisions
 
-The enterprise profile also includes enhanced specialists with tenant isolation checks, cross-package impact analysis, and regulatory-aware reviews.
+- **APPROVE**: no blocking specialist or lead finding remains.
+- **REQUEST_CHANGES**: a specialist or lead found a critical/high issue.
+- **BLOCK**: the lead found a fundamental scope, architecture, or coherence problem. GitHub receives this as `REQUEST_CHANGES` because GitHub has no `BLOCK` review event.
 
-## How review decisions work
-
-- **APPROVE** — all specialists pass, lead finds no blocking issues
-- **REQUEST_CHANGES** — any specialist found critical/high severity issues
-- **BLOCK** — lead found a fundamental problem (architectural violation, scope drift)
-
-Each specialist operates under **domain sovereignty** — they only review their area and express constraints ("external input must be validated"), not implementation directives ("use Zod"). The lead reviewer mediates conflicts between specialists using a priority hierarchy: Regulatory > Security > Reliability > Convenience.
+Specialists operate under domain sovereignty: they state the constraint in their domain and leave cross-domain implementation choices to the lead reviewer.
 
 ## Supported models
 
-Anything [litellm supports](https://docs.litellm.ai/docs/providers):
+Use any provider supported by LiteLLM and set the corresponding environment variable.
 
 ```bash
 # Google
-vigil review $PR -m gemini/gemini-3.1-flash-lite
-vigil review $PR -m gemini/gemini-3.1-pro
+vigil review "$PR" --model gemini/gemini-3.1-flash-lite
+vigil review "$PR" --model gemini/gemini-3.1-pro
 
 # Anthropic
-vigil review $PR -m claude-sonnet-4-6
-vigil review $PR -m claude-opus-4
+vigil review "$PR" --model claude-sonnet-4-6
 
 # OpenAI
-vigil review $PR -m gpt-4o
-vigil review $PR -m o3-mini
+vigil review "$PR" --model gpt-4o
+vigil review "$PR" --model o3-mini
 
-# Local (Ollama)
-vigil review $PR -m ollama/llama3
+# Local
+vigil review "$PR" --model ollama/llama3
 ```
-
-Set the corresponding API key as an environment variable (`GEMINI_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.).
 
 ## Architecture
 
-```
+```text
 src/vigil/
-├── cli.py              # Typer CLI entry point
-├── reviewer.py         # Multi-persona review engine
-├── personas.py         # Specialist definitions & profiles
-├── models.py           # Pydantic models (Finding, PersonaVerdict, ReviewResult)
-├── diff_parser.py      # Diff parsing, file routing, commentable line extraction
-├── github.py           # GitHub API (fetch PR data)
-├── github_review.py    # Post reviews with inline comments
-├── comment_manager.py  # Comment lifecycle: fetch, resolve, dedup, decision logging
-├── issue_manager.py    # Auto-create GitHub issues for observations
-├── decision_log.py     # SQLite-backed decision memory (~/.vigil/decisions.db)
-├── alerts.py           # Email alerting for alert-enabled personas
-├── webhook.py          # FastAPI webhook server for GitHub events
-└── audit.py            # Audit trail logging
+|-- cli.py                     Typer CLI and review orchestration
+|-- reviewer.py                Specialist dispatch and lead synthesis
+|-- personas.py                Profiles, prompts, and routing patterns
+|-- models.py                  Pydantic review models
+|-- diff_parser.py             Diff parsing and docs-only classification
+|-- github.py                  PR data and GitHub API access
+|-- github_review.py           Review and inline-comment posting
+|-- comment_manager.py         Conversation, thread, and resolution lifecycle
+|-- context_manager.py         Cross-round fingerprints and filtering
+|-- cross_specialist_dedup.py  Consensus merging and formatting
+|-- issue_manager.py           Observation issue creation and deduplication
+|-- decision_log.py            SQLite-backed decision memory
+|-- alerts.py                  SMTP and LunaOS escalation delivery
+|-- webhook.py                 FastAPI webhook server
+|-- audit.py                   SQLite review audit trail
+`-- utils.py                   Sanitization and shared helpers
 ```
 
-The review pipeline:
+The current pipeline:
 
-1. **Fetch** PR diff and metadata from GitHub
-2. **Parse** diff into per-file hunks
-3. **Route** each specialist to only their relevant files (via glob patterns)
-4. **Dispatch** specialists sequentially (each gets a focused, smaller diff)
-5. **Filter** known decisions from the decision log (suppress previously acknowledged patterns)
-6. **Aggregate** verdicts and run lead reviewer
-7. **Create issues** for non-blocking observations (with dedup)
-8. **Post** findings as inline PR comments on exact diff lines (with 4-layer fallback)
+1. Fetch PR metadata, full diff, top-level comments, and prior reviews.
+2. Locate previous Vigil state for posted re-reviews.
+3. Resolve acknowledged or code-addressed threads.
+4. Parse the full diff and take the documentation-only fast path when eligible.
+5. Route relevant hunks to each specialist sequentially.
+6. Filter known decisions and send optional specialist alerts.
+7. Run the lead reviewer with specialist results and conversation evidence.
+8. Merge duplicate cross-specialist findings into consensus findings.
+9. Create deduplicated issues for non-blocking observations.
+10. Filter cross-round duplicates and post inline findings with fallbacks.
+
+See [CROSS_ROUND_CONTEXT.md](CROSS_ROUND_CONTEXT.md) for fingerprinting and consensus details.
 
 ## License
 
