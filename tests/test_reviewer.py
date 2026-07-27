@@ -11,6 +11,7 @@ from vigil.reviewer import (
     _is_transient_llm_error,
     _parse_findings,
     _parse_json_response,
+    _parse_observations,
     review_diff,
 )
 
@@ -59,6 +60,68 @@ class TestParseFindings:
                 "category": "test", "message": "msg"}]
         findings = _parse_findings(raw)
         assert findings[0].line is None
+
+
+# ---------- _parse_observations ----------
+
+class TestParseObservations:
+
+    def test_drops_praise_without_follow_up_action(self):
+        raw = [
+            {
+                "file": "src/components/Blog.tsx",
+                "line": 88,
+                "severity": "low",
+                "category": "documentation",
+                "message": "The comment regarding DOMPurify as 'defence in depth' is excellent context for future maintainers.",
+                "suggestion": None,
+            },
+            {
+                "file": "src/components/CDMOFailedRunReview.tsx",
+                "line": 641,
+                "severity": "low",
+                "category": "accessibility",
+                "message": "The addition of scroll-mt-28 to the error alert is a good fix for the fixed-navbar focus-scroll issue.",
+                "suggestion": None,
+            },
+        ]
+
+        assert _parse_observations(raw) == []
+
+    def test_keeps_observation_with_concrete_follow_up(self):
+        raw = [
+            {
+                "file": "src/components/Blog.tsx",
+                "line": 90,
+                "severity": "low",
+                "category": "security",
+                "message": "DOMPurify uses its default allowlist.",
+                "suggestion": "Define the permitted tags and attributes explicitly.",
+            }
+        ]
+
+        observations = _parse_observations(raw)
+
+        assert len(observations) == 1
+        assert observations[0].suggestion == "Define the permitted tags and attributes explicitly."
+
+    @pytest.mark.parametrize(
+        "suggestion",
+        [None, "", "   ", "N/A", "None.", "No action needed", "No changes needed."],
+    )
+    def test_drops_missing_or_no_op_suggestion(self, suggestion):
+        raw = [
+            {
+                "file": "a.py",
+                "line": 1,
+                "severity": "low",
+                "category": "documentation",
+                "message": "Informational note.",
+                "suggestion": suggestion,
+            }
+        ]
+
+        assert _parse_observations(raw) == []
 
 
 # ---------- _build_pr_context_block ----------

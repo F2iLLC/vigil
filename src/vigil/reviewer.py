@@ -69,6 +69,36 @@ def _parse_findings(raw_list: list[dict]) -> list[Finding]:
     return results
 
 
+_NO_ACTION_SUGGESTIONS = {
+    "n/a",
+    "none",
+    "no action needed",
+    "no change needed",
+    "no changes needed",
+    "not applicable",
+}
+
+
+def _parse_observations(raw_list: list[dict]) -> list[Finding]:
+    """Parse only observations that define concrete follow-up work.
+
+    Vigil turns observations into GitHub issues. Treat the LLM response as
+    untrusted at that boundary: praise, descriptions, and other notes without
+    a proposed action are review context, not backlog items.
+    """
+    observations = _parse_findings(raw_list)
+    actionable: list[Finding] = []
+
+    for observation in observations:
+        suggestion = (observation.suggestion or "").strip()
+        normalized = " ".join(suggestion.rstrip(".").lower().split())
+        if not suggestion or normalized in _NO_ACTION_SUGGESTIONS:
+            continue
+        actionable.append(observation)
+
+    return actionable
+
+
 def _gen_session_id() -> str:
     """Generate a short agent session ID like VGL-a3f8b2."""
     return f"VGL-{secrets.token_hex(3)}"
@@ -170,7 +200,7 @@ def _run_specialist(persona: Persona, pr_block: str, model: str, delay: float = 
     raw = _parse_json_response(content)
 
     findings = _parse_findings(raw.get("findings", []))
-    observations = _parse_findings(raw.get("observations", []))
+    observations = _parse_observations(raw.get("observations", []))
     checks = raw.get("checks", {})
     decision = raw.get("decision", "APPROVE")
 
