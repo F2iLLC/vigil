@@ -22,7 +22,8 @@ Respond with valid JSON matching this schema:
     }
   ],
   "observations": [
-    same shape as findings — non-blocking notes worth tracking as future issues
+    same shape as findings — non-blocking problems worth tracking as future issues.
+    Unlike findings, every observation MUST include a concrete, non-null suggestion.
   ]
 }
 
@@ -30,6 +31,7 @@ Rules:
 - If you have no findings, return "decision": "APPROVE" with empty findings list.
 - Only return REQUEST_CHANGES if there are high or critical severity findings.
 - Be specific: file paths, line numbers, concrete suggestions.
+- Observations without a concrete action are invalid and will be discarded.
 
 CHANGED LINES ONLY — THIS IS CRITICAL:
 - You are reviewing a DIFF. Only flag issues on lines that were ADDED or MODIFIED
