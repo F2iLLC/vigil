@@ -204,7 +204,7 @@ def fetch_review_threads(
 ) -> list[dict]:
     """Fetch review threads via GraphQL with path, line, body, and resolution status.
 
-    Returns list of dicts: {id, isResolved, path, line, body}
+    Returns list of dicts: {id, isResolved, path, line, body, comments}
     """
     query = """
     query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
@@ -215,11 +215,15 @@ def fetch_review_threads(
             nodes {
               id
               isResolved
-              comments(first: 1) {
+              comments(first: 20) {
                 nodes {
+                  id
                   body
                   path
                   line
+                  author {
+                    login
+                  }
                 }
               }
             }
@@ -236,13 +240,15 @@ def fetch_review_threads(
         pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
         thread_data = pr_data.get("reviewThreads", {})
         for node in thread_data.get("nodes", []):
-            first_comment = (node.get("comments", {}).get("nodes") or [{}])[0]
+            comments = node.get("comments", {}).get("nodes") or []
+            first_comment = (comments or [{}])[0]
             threads.append({
                 "id": node["id"],
                 "isResolved": node["isResolved"],
                 "path": first_comment.get("path"),
                 "line": first_comment.get("line"),
                 "body": first_comment.get("body", ""),
+                "comments": comments,
             })
         page_info = thread_data.get("pageInfo", {})
         if page_info.get("hasNextPage"):
@@ -301,6 +307,24 @@ def resolve_threads_batch(thread_ids: list[str], token: str) -> list[str]:
     return resolved
 
 
+def _thread_has_addressing_reply(thread: dict) -> bool:
+    """Return true when a Vigil thread has at least one non-empty reply."""
+    comments = thread.get("comments") or []
+    if len(comments) < 2:
+        return False
+
+    root_author = ((comments[0].get("author") or {}).get("login") or "").lower()
+    for reply in comments[1:]:
+        body = (reply.get("body") or "").strip()
+        if not body:
+            continue
+        author = ((reply.get("author") or {}).get("login") or "").lower()
+        if author and root_author and author == root_author:
+            continue
+        return True
+    return False
+
+
 def resolve_addressed_threads(
     owner: str, repo: str, pr_number: int, token: str,
     changed_files: dict[str, set[int]],
@@ -310,7 +334,9 @@ def resolve_addressed_threads(
     A thread is considered 'addressed' if:
       - It's a Vigil thread (body contains VGL session ID)
       - It's not already resolved
-      - Its file is in changed_files AND its line is in the changed lines set
+      - Its file is in changed_files AND either:
+        - its line is in the changed lines set, or
+        - someone replied in the thread and the same file changed
 
     Returns count of resolved threads.
     """
@@ -327,7 +353,9 @@ def resolve_addressed_threads(
         line = t.get("line")
         if path and path in changed_files:
             file_lines = changed_files[path]
-            if line is None or line in file_lines:
+            line_changed = line is None or line in file_lines
+            file_changed_with_reply = bool(file_lines) and _thread_has_addressing_reply(t)
+            if line_changed or file_changed_with_reply:
                 to_resolve.append(t["id"])
 
     if not to_resolve:
