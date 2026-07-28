@@ -362,6 +362,10 @@ def resolve_addressed(
 
     console.print(f"[dim]Last Vigil review at {last_sha[:7]}, head is {pr_data['head_sha'][:7]}[/dim]")
 
+    dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
+    if dismissed:
+        console.print(f"[dim]Resolved {dismissed} dismissed thread(s)[/dim]")
+
     if last_sha == pr_data["head_sha"]:
         console.print("[dim]No new commits since last review — nothing to resolve[/dim]")
         raise typer.Exit(0)
@@ -388,12 +392,6 @@ def resolve_addressed(
 
     count = resolve_addressed_threads(owner, repo, pr_number, token, changed_line_map)
     console.print(f"[dim]Auto-resolved {count} addressed thread(s)[/dim]")
-
-    # Also dismiss any threads with "resolved" replies while we're at it
-    dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
-    if dismissed:
-        console.print(f"[dim]Also resolved {dismissed} dismissed thread(s)[/dim]")
-
 
 @app.command()
 def serve(
