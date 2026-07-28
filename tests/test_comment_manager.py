@@ -12,6 +12,7 @@ from vigil.comment_manager import (
     build_conversation_context,
     deduplicate_comments,
     is_duplicate_finding,
+    resolve_addressed_threads,
     resolve_threads_batch,
     VIGIL_SESSION_PATTERN,
 )
@@ -248,6 +249,105 @@ class TestResolveThreadsBatch:
         # No network call should happen
         result = resolve_threads_batch([], "fake-token")
         assert result == []
+
+
+# ---------- resolve_addressed_threads ----------
+
+class TestResolveAddressedThreads:
+
+    def test_resolves_exact_changed_line(self, monkeypatch):
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads",
+            lambda *args: [{
+                "id": "thread-1",
+                "isResolved": False,
+                "path": "src/app.py",
+                "line": 42,
+                "body": "Finding `VGL-abc123`",
+                "comments": [{"body": "Finding `VGL-abc123`", "author": {"login": "vigil"}}],
+            }],
+        )
+        resolved_ids = []
+        monkeypatch.setattr(
+            "vigil.comment_manager.resolve_threads_batch",
+            lambda ids, token: resolved_ids.extend(ids) or ids,
+        )
+
+        count = resolve_addressed_threads("F2iLLC", "demo", 1, "token", {"src/app.py": {42}})
+
+        assert count == 1
+        assert resolved_ids == ["thread-1"]
+
+    def test_resolves_same_file_when_thread_has_reply(self, monkeypatch):
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads",
+            lambda *args: [{
+                "id": "thread-1",
+                "isResolved": False,
+                "path": "tests/test_app.py",
+                "line": 1,
+                "body": "Add regression coverage `VGL-def456`",
+                "comments": [
+                    {"body": "Add regression coverage `VGL-def456`", "author": {"login": "vigil"}},
+                    {"body": "Added malformed-reference tests in the same file.", "author": {"login": "codex"}},
+                ],
+            }],
+        )
+        resolved_ids = []
+        monkeypatch.setattr(
+            "vigil.comment_manager.resolve_threads_batch",
+            lambda ids, token: resolved_ids.extend(ids) or ids,
+        )
+
+        count = resolve_addressed_threads("F2iLLC", "demo", 1, "token", {"tests/test_app.py": {88, 89}})
+
+        assert count == 1
+        assert resolved_ids == ["thread-1"]
+
+    def test_same_file_change_without_reply_does_not_resolve_nearby_thread(self, monkeypatch):
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads",
+            lambda *args: [{
+                "id": "thread-1",
+                "isResolved": False,
+                "path": "src/app.py",
+                "line": 10,
+                "body": "Finding `VGL-abc123`",
+                "comments": [{"body": "Finding `VGL-abc123`", "author": {"login": "vigil"}}],
+            }],
+        )
+        monkeypatch.setattr(
+            "vigil.comment_manager.resolve_threads_batch",
+            lambda ids, token: ids,
+        )
+
+        count = resolve_addressed_threads("F2iLLC", "demo", 1, "token", {"src/app.py": {99}})
+
+        assert count == 0
+
+    def test_reply_without_same_file_change_does_not_resolve_thread(self, monkeypatch):
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads",
+            lambda *args: [{
+                "id": "thread-1",
+                "isResolved": False,
+                "path": "src/app.py",
+                "line": 10,
+                "body": "Finding `VGL-abc123`",
+                "comments": [
+                    {"body": "Finding `VGL-abc123`", "author": {"login": "vigil"}},
+                    {"body": "Handled elsewhere.", "author": {"login": "codex"}},
+                ],
+            }],
+        )
+        monkeypatch.setattr(
+            "vigil.comment_manager.resolve_threads_batch",
+            lambda ids, token: ids,
+        )
+
+        count = resolve_addressed_threads("F2iLLC", "demo", 1, "token", {"src/other.py": {10}})
+
+        assert count == 0
 
 
 # ---------- _is_resolution_reply ----------
