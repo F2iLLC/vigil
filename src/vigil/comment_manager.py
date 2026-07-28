@@ -21,10 +21,11 @@ VIGIL_SESSION_PATTERN = re.compile(r"VGL-[0-9a-f]{6}")
 
 # Resolution reply detection
 _RESOLUTION_KEYWORDS = re.compile(
-    r"\b(resolved|fixed|addressed|done)\b", re.IGNORECASE
+    r"\b(resolved|fixed|addressed|done|over\s*ruled|overridden|wontfix|acceptable|follow[-\s]?up|tracked)\b",
+    re.IGNORECASE,
 )
-_ISSUE_LINK_PATTERN = re.compile(
-    r"https?://github\.com/([^/]+)/([^/]+)/issues/(\d+)"
+_TRACKING_LINK_PATTERN = re.compile(
+    r"https?://github\.com/([^/]+)/([^/]+)/(?:issues|pull)/(\d+)"
 )
 _SHORT_ISSUE_REF = re.compile(r"#(\d+)")
 _ISSUE_RELEVANCE_THRESHOLD = 0.25
@@ -376,7 +377,7 @@ def _is_resolution_reply(body: str) -> bool:
     if _RESOLUTION_KEYWORDS.search(body):
         return True
     # Issue link (full URL or short ref like #45)
-    if _ISSUE_LINK_PATTERN.search(body) or _SHORT_ISSUE_REF.search(body):
+    if _TRACKING_LINK_PATTERN.search(body) or _SHORT_ISSUE_REF.search(body):
         return True
     return False
 
@@ -392,7 +393,7 @@ def _extract_issue_refs(body: str) -> list[tuple[str, str, int]]:
 
     # Full URL matches — track their spans so we don't double-count short refs inside them
     full_url_spans: list[tuple[int, int]] = []
-    for match in _ISSUE_LINK_PATTERN.finditer(body):
+    for match in _TRACKING_LINK_PATTERN.finditer(body):
         owner, repo, num = match.group(1), match.group(2), int(match.group(3))
         results.append((owner, repo, num))
         full_url_spans.append((match.start(), match.end()))
@@ -583,7 +584,13 @@ def resolve_dismissed_threads(
                 # Infer decision type from the reply text
                 reason = info.get("reason", "")
                 reason_lower = reason.lower()
-                if "false positive" in reason_lower or "false_positive" in reason_lower:
+                if (
+                    "false positive" in reason_lower
+                    or "false_positive" in reason_lower
+                    or "overruled" in reason_lower
+                    or "over ruled" in reason_lower
+                    or "overridden" in reason_lower
+                ):
                     decision_type = "false_positive"
                 elif "wontfix" in reason_lower or "won't fix" in reason_lower or "acceptable" in reason_lower:
                     decision_type = "wontfix"

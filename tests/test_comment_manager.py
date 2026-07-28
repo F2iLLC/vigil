@@ -397,6 +397,12 @@ class TestIsResolutionReply:
     def test_resolved_with_issue_link(self):
         assert _is_resolution_reply("Resolved via https://github.com/o/r/issues/10") is True
 
+    def test_overruled_reply(self):
+        assert _is_resolution_reply("Overruled by maintainer; acceptable risk.") is True
+
+    def test_follow_up_reply(self):
+        assert _is_resolution_reply("Tracked for a follow-up PR.") is True
+
     def test_just_number_not_resolution(self):
         assert _is_resolution_reply("42") is False
 
@@ -409,6 +415,11 @@ class TestExtractIssueRefs:
         refs = _extract_issue_refs("See https://github.com/org/repo/issues/123")
         assert len(refs) == 1
         assert refs[0] == ("org", "repo", 123)
+
+    def test_full_pull_url(self):
+        refs = _extract_issue_refs("Follow-up PR: https://github.com/org/repo/pull/456")
+        assert len(refs) == 1
+        assert refs[0] == ("org", "repo", 456)
 
     def test_short_ref(self):
         refs = _extract_issue_refs("Fixed in #45")

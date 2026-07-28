@@ -156,7 +156,19 @@ jobs:
           contains(github.event.comment.body, 'addressed') ||
           contains(github.event.comment.body, 'Addressed') ||
           contains(github.event.comment.body, 'done') ||
-          contains(github.event.comment.body, 'Done')
+          contains(github.event.comment.body, 'Done') ||
+          contains(github.event.comment.body, 'overruled') ||
+          contains(github.event.comment.body, 'Overruled') ||
+          contains(github.event.comment.body, 'over ruled') ||
+          contains(github.event.comment.body, 'Over ruled') ||
+          contains(github.event.comment.body, 'wontfix') ||
+          contains(github.event.comment.body, 'acceptable') ||
+          contains(github.event.comment.body, 'follow-up') ||
+          contains(github.event.comment.body, 'follow up') ||
+          contains(github.event.comment.body, 'tracked') ||
+          contains(github.event.comment.body, '#') ||
+          contains(github.event.comment.body, '/issues/') ||
+          contains(github.event.comment.body, '/pull/')
         )
       ) || (
         github.event_name == 'issue_comment' &&
@@ -164,7 +176,25 @@ jobs:
         !contains(github.event.comment.body, '/vigil review') &&
         (
           contains(github.event.comment.body, 'resolved') ||
-          contains(github.event.comment.body, 'Resolved')
+          contains(github.event.comment.body, 'Resolved') ||
+          contains(github.event.comment.body, 'fixed') ||
+          contains(github.event.comment.body, 'Fixed') ||
+          contains(github.event.comment.body, 'addressed') ||
+          contains(github.event.comment.body, 'Addressed') ||
+          contains(github.event.comment.body, 'done') ||
+          contains(github.event.comment.body, 'Done') ||
+          contains(github.event.comment.body, 'overruled') ||
+          contains(github.event.comment.body, 'Overruled') ||
+          contains(github.event.comment.body, 'over ruled') ||
+          contains(github.event.comment.body, 'Over ruled') ||
+          contains(github.event.comment.body, 'wontfix') ||
+          contains(github.event.comment.body, 'acceptable') ||
+          contains(github.event.comment.body, 'follow-up') ||
+          contains(github.event.comment.body, 'follow up') ||
+          contains(github.event.comment.body, 'tracked') ||
+          contains(github.event.comment.body, '#') ||
+          contains(github.event.comment.body, '/issues/') ||
+          contains(github.event.comment.body, '/pull/')
         )
       )
     steps:
