@@ -132,7 +132,7 @@ class TestBuildPrContextBlock:
         base = {
             "title": "Test PR", "author": "user", "head": "feature",
             "base": "main", "additions": 10, "deletions": 5,
-            "changed_files": 1, "body": "Test",
+            "changed_files": 1, "body": "Test", "head_sha": "abc123def456",
         }
         base.update(overrides)
         return base
@@ -151,6 +151,15 @@ class TestBuildPrContextBlock:
         assert "PR Conversation" in block
         assert "codex-bot" in block
         assert "treat it as evidence" in block
+        assert "Conversation is historical discussion, not current code" in block
+        assert "Never repeat a prior" in block
+
+    def test_marks_head_diff_as_authoritative_and_deleted_lines_as_historical(self):
+        block = _build_pr_context_block("-old_code()\n+new_code()", self._pr_context())
+
+        assert "Authoritative head commit:** abc123def456" in block
+        assert "current reviewed tree" in block
+        assert "removed (`-`) lines are historical" in block
 
 
 # ---------- Non-blocking persona logic in review_diff ----------

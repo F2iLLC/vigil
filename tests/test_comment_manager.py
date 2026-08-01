@@ -517,6 +517,41 @@ class TestBuildConversationContext:
         assert "review:approved" in result
         assert "LGTM overall" in result
 
+    def test_excludes_prior_vigil_reviews_from_re_review_context(self):
+        reviews = [{
+            "submitted_at": "2026-07-15T11:00:00Z",
+            "user": {"login": "vigil-reviewer"},
+            "state": "CHANGES_REQUESTED",
+            "body": (
+                "Old finding claims bodyChunks still buffers the response.\n\n"
+                "Reviewed by [Vigil]"
+            ),
+        }]
+
+        assert build_conversation_context([], reviews) == ""
+
+    def test_keeps_human_review_alongside_excluded_vigil_review(self):
+        reviews = [
+            {
+                "submitted_at": "2026-07-15T11:00:00Z",
+                "user": {"login": "vigil-reviewer"},
+                "state": "CHANGES_REQUESTED",
+                "body": "Superseded bot finding\n\nReviewed by [Vigil]",
+            },
+            {
+                "submitted_at": "2026-07-15T12:00:00Z",
+                "user": {"login": "maintainer"},
+                "state": "COMMENTED",
+                "body": "The current implementation still needs a timeout test.",
+            },
+        ]
+
+        result = build_conversation_context([], reviews)
+
+        assert "Superseded bot finding" not in result
+        assert "maintainer" in result
+        assert "timeout test" in result
+
     def test_skips_reviews_without_body(self):
         reviews = [{
             "submitted_at": "2026-07-15T11:00:00Z",
