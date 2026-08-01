@@ -160,20 +160,28 @@ This is what has ALREADY BEEN SAID in this PR's thread — treat it as evidence,
 not code. If the diff, description, or a doc/plan change asserts something as
 fact that this conversation contradicts, that is a finding (category
 "factual-accuracy") even if the code itself is otherwise correct.
+Conversation is historical discussion, not current code. Never repeat a prior
+finding unless the authoritative head diff independently supports it; removed
+(`-`) lines and descriptions of earlier commits are not present in the head tree.
 ```
 {conversation}
 ```
 """
+    head_sha = pr_context.get("head_sha") or "unknown"
     return f"""## PR: {pr_context['title']}
 
 **Author:** {pr_context['author']}
 **Branch:** {pr_context['head']} -> {pr_context['base']}
+**Authoritative head commit:** {head_sha}
 **Stats:** +{pr_context['additions']} -{pr_context['deletions']} across {pr_context['changed_files']} files
 
 ### Description
 {pr_context.get('body') or 'No description provided.'}
 {summary_section}{conversation_section}
 ### Diff (files relevant to your domain)
+This base-to-head diff represents the current reviewed tree. Added/context lines
+are current head content; removed (`-`) lines are historical and cannot support
+a finding about code that still exists.
 ```diff
 {diff}
 ```"""

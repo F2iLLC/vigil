@@ -140,6 +140,13 @@ def build_conversation_context(
         body = (r.get("body") or "").strip()
         if not body:
             continue
+        # A prior Vigil verdict is generated evidence about an older head, not
+        # independent conversation evidence. Feeding it back into a re-review
+        # can anchor the model on findings that a later commit removed. Human
+        # reviews remain useful context; Vigil's own summaries are handled by
+        # the dedicated cross-round lifecycle instead.
+        if VIGIL_SIGNATURE in body:
+            continue
         state = (r.get("state") or "").lower()
         items.append((
             r.get("submitted_at", ""),
