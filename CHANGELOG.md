@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - **`find_best_file_for_finding` fallback** — Now correctly skips files with empty line sets when falling back to the first alphabetical file.
 - **`_mock_response` helper** — Fixed falsy `{}` bug where `json_data or []` treated empty dict as falsy.
+- **`Detect Python` guard now probes `venv`, not just version** — The guard previously checked only that system `python3` was >= 3.10 before skipping `actions/setup-python`. On Debian/Ubuntu, a 3.10+ interpreter can still lack `ensurepip` (the `python3.X-venv` package is separate), so `python3 -m venv` failed downstream even though the guard reported success — and `actions/setup-python` was skipped exactly when it was needed. Now runs `python3 -m venv` against a throwaway directory as part of the check and falls back to `actions/setup-python` if it fails. Root cause of F2iLLC/LunaOS#3775 (fleet-wide: also hit bioqms-core, relara, praxislms via the same `lunaos-light-1` runner).
 
 ## [0.1.0] - 2026-03-12
 
