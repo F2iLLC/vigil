@@ -55,10 +55,26 @@ runs:
         if command -v python3 >/dev/null 2>&1; then
           PY_VERSION="$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
           if python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)'; then
-            echo "Found system python3 $PY_VERSION — skipping setup-python"
-            echo "python=$(command -v python3)" >> "$GITHUB_OUTPUT"
-            echo "needs_setup=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            # A version check alone is not sufficient: Debian/Ubuntu ships
+            # python3 without ensurepip unless python3.X-venv is separately
+            # installed, so `python3 -m venv` can fail even though the
+            # interpreter itself is a perfectly fine 3.10+. Probe that venv
+            # actually works before committing to the system interpreter —
+            # otherwise this guard reports success, "Install Vigil into a
+            # venv" then hard-fails, and (depending on the caller's
+            # continue-on-error setting) the whole run can silently report
+            # green without ever posting a review. Seen for real on
+            # F2iLLC/LunaOS's lunaos-light-1 runner (LunaOS#3775).
+            PROBE_DIR="$(mktemp -d)"
+            if python3 -m venv "$PROBE_DIR/probe" >/dev/null 2>&1; then
+              rm -rf "$PROBE_DIR"
+              echo "Found system python3 $PY_VERSION with a working venv module — skipping setup-python"
+              echo "python=$(command -v python3)" >> "$GITHUB_OUTPUT"
+              echo "needs_setup=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            rm -rf "$PROBE_DIR"
+            echo "System python3 $PY_VERSION found, but 'python3 -m venv' failed (ensurepip missing?) — falling back to setup-python"
           fi
         fi
         echo "No suitable system python3 — will run actions/setup-python"
