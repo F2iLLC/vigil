@@ -94,6 +94,8 @@ Options:
   -p, --profile TEXT    default or enterprise
   --json                Print the structured result
   --post                Post the result to GitHub
+  --force               Review even when no files changed since the last review
+  --reason TEXT         Why the review was requested (recorded in the run log)
 ```
 
 Examples:
@@ -161,14 +163,43 @@ vigil serve \
 
 Vigil reviews the full PR diff against the base branch. On a posted re-review it also:
 
-1. Locates the most recent Vigil review commit.
+1. Locates the most recent Vigil review commit, and the **state** of Vigil's reviews.
 2. Resolves threads with accepted resolution replies.
-3. Checks whether the PR head changed; if no files changed, it skips the duplicate review.
+3. Checks whether the PR head changed; if no files changed, it skips the duplicate review — unless one of the re-review triggers below applies.
 4. Resolves threads whose cited code changed.
 5. Re-reviews the **full PR diff**, not only the latest commit or changed-file subset.
 6. Filters findings already covered by active or resolved Vigil comments.
 
 This distinction matters: incremental state controls skipping, thread resolution, and deduplication, while the model still receives the complete PR change.
+
+### Re-review triggers on an unchanged head
+
+Skipping on an unchanged head keeps re-review cost down, but a PR must never be
+able to reach a state it cannot leave. Vigil therefore still reviews — against
+the full base-to-head diff — when any of the following hold:
+
+- the run was explicitly requested with `/vigil review`;
+- a Vigil `CHANGES_REQUESTED` review is still standing, so the block can be reconsidered;
+- the current head carries no live Vigil verdict, for example because the verdict at head was dismissed;
+- Vigil threads were resolved during this run, so the evidence behind the prior verdict changed.
+
+Liveness is evaluated on each review's `state`, not on recency: `dismiss_stale_reviews_on_push`
+leaves `DISMISSED` reviews in the API response, and a dismissed review must not read as a live one.
+
+No empty or no-op commit is ever required to obtain a fresh verdict.
+
+### Withdrawing a superseded block
+
+When a re-review concludes **APPROVE**, Vigil dismisses its own prior
+`CHANGES_REQUESTED` reviews, naming the head SHA that satisfied them. This
+matters because `dismiss_stale_reviews_on_push` only stale-dismisses
+*approvals*: without an explicit withdrawal, a later push drops Vigil's
+approval and an older block becomes the latest live review again.
+
+A re-review that still concludes `REQUEST_CHANGES` changes nothing — Vigil
+standing its ground is intended. Nothing is dismissed when the review degraded
+to a `COMMENT` event, because a comment clears no block and dismissing the old
+one would leave the PR unguarded.
 
 ### Documentation-only PRs
 
@@ -296,6 +327,8 @@ Available inputs:
 | `model` | `gemini/gemini-3.1-flash-lite` | LiteLLM model identifier |
 | `lead-model` | Same as `model` | Optional separate lead model |
 | `profile` | `default` | `default` or `enterprise` |
+| `force` | `false` | Review even when no files changed since the last review; the reusable workflow sets this for on-demand `/vigil review` |
+| `reason` | Empty | Why the review was requested; recorded in the run log |
 | `github-token` | `github.token` | Use `VIGIL_REVIEW_TOKEN` for real approval events |
 | `gemini-api-key` | Empty | Gemini provider credential |
 | `anthropic-api-key` | Empty | Anthropic provider credential |

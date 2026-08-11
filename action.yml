@@ -27,6 +27,14 @@ inputs:
     description: "Review profile: default, enterprise"
     required: false
     default: "default"
+  force:
+    description: "Review even when no files changed since the last review (set for on-demand '/vigil review')"
+    required: false
+    default: "false"
+  reason:
+    description: "Why this review was requested; recorded in the run log"
+    required: false
+    default: ""
   github-token:
     description: "GitHub token for posting reviews (defaults to GITHUB_TOKEN)"
     required: false
@@ -110,6 +118,11 @@ runs:
         GEMINI_API_KEY: ${{ inputs.gemini-api-key }}
         OPENAI_API_KEY: ${{ inputs.openai-api-key }}
         ANTHROPIC_API_KEY: ${{ inputs.anthropic-api-key }}
+        # Passed via env rather than interpolated into the script body: the
+        # reason can carry caller-supplied text, and `${{ }}` inside `run:` is
+        # a shell-injection surface.
+        VIGIL_FORCE: ${{ inputs.force }}
+        VIGIL_REASON: ${{ inputs.reason }}
       run: |
         set -euo pipefail
         VIGIL="${{ steps.install.outputs.vigil }}"
@@ -133,6 +146,15 @@ runs:
           )
           if [ -n "${{ inputs.lead-model }}" ]; then
             ARGS+=(--lead-model "${{ inputs.lead-model }}")
+          fi
+          # An on-demand '/vigil review' must produce a fresh verdict even when
+          # the head has not moved, otherwise the documented escape hatch is a
+          # no-op on exactly the PRs that need it (F2iLLC/vigil#49).
+          if [ "${VIGIL_FORCE:-false}" = "true" ]; then
+            ARGS+=(--force)
+          fi
+          if [ -n "${VIGIL_REASON:-}" ]; then
+            ARGS+=(--reason "$VIGIL_REASON")
           fi
           "$VIGIL" review "${ARGS[@]}"
         fi

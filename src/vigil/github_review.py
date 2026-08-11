@@ -285,6 +285,7 @@ def post_review(
     diff: str = "",
     existing_comments: list[dict] | None = None,
     observation_issues: list[tuple[Finding, str]] | None = None,
+    outcome: dict | None = None,
 ) -> str:
     """Post the review result as a GitHub PR review with inline comments.
 
@@ -308,6 +309,15 @@ def post_review(
             that were opened as GitHub issues. When provided, the review body
             renders observations as compact issue links instead of a
             collapsible details block.
+        outcome: Optional dict, populated in place with what was actually
+            submitted: ``requested_event`` (what result.decision maps to) and
+            ``submitted_event`` (what GitHub accepted — one of APPROVE,
+            REQUEST_CHANGES, COMMENT, or ISSUE_COMMENT when every review
+            attempt failed). Callers that act on the verdict landing — e.g.
+            dismissing Vigil's own stale blocks (issue #48) — must check
+            ``submitted_event``, because a degraded COMMENT review does not
+            clear a block and dismissing on that path would leave the PR
+            unguarded.
 
     Returns the URL of the created review.
     """
@@ -389,6 +399,14 @@ def post_review(
     }
     event = event_map.get(result.decision, "COMMENT")
 
+    # Tracks what GitHub actually accepted, as the fallback ladder degrades.
+    submitted_event = event
+
+    def _record_outcome() -> None:
+        if outcome is not None:
+            outcome["requested_event"] = event
+            outcome["submitted_event"] = submitted_event
+
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
     headers = github_headers(token)
 
@@ -427,6 +445,9 @@ def post_review(
         # APPROVE and REQUEST_CHANGES require write/collaborator access.
         # On third-party repos we can only submit COMMENT reviews.
         log.info("Event '%s' rejected (likely no write access) - retrying with COMMENT", event)
+        # From here on the review carries no verdict: a COMMENT review neither
+        # approves nor blocks, so it cannot clear a standing CHANGES_REQUESTED.
+        submitted_event = "COMMENT"
         payload_comment: dict = {
             "body": body,
             "event": "COMMENT",
@@ -455,11 +476,14 @@ def post_review(
     if resp.status_code == 422:
         # --- Final fallback: post as a regular issue comment ---
         log.warning("All PR Review API attempts failed — falling back to issue comment")
+        submitted_event = "ISSUE_COMMENT"
         comment_url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
         resp = httpx.post(comment_url, headers=headers, json={"body": body}, timeout=30)
         resp.raise_for_status()
+        _record_outcome()
         return resp.json().get("html_url", pr_url_fallback)
 
     resp.raise_for_status()
     review_data = resp.json()
+    _record_outcome()
     return review_data.get("html_url", pr_url_fallback)

@@ -12,11 +12,13 @@ from rich.table import Table
 from .audit import write_audit_entry
 from .comment_manager import (
     build_conversation_context,
+    dismiss_stale_vigil_blocks,
     fetch_all_pr_reviews,
     fetch_all_vigil_comments,
     fetch_pr_conversation_comments,
     fetch_vigil_comments,
     get_last_reviewed_sha,
+    get_vigil_review_state,
     resolve_addressed_threads,
     resolve_dismissed_threads,
 )
@@ -92,6 +94,46 @@ def _print_findings(findings: list[Finding], title: str):
             console.print(f"  [dim]{loc}[/dim] -> {f.suggestion}")
 
 
+def _rereview_reasons(
+    *,
+    forced: bool,
+    reason: str,
+    outstanding_blocks: list[dict],
+    settled_verdict_at_head: bool,
+    resolved_threads: int,
+) -> list[str]:
+    """Why a review should run even though no files changed since last review.
+
+    Pure, so the gate can be tested without a network. An empty list means the
+    ordinary case — no new commits, no standing block, nobody asked — and the
+    caller must keep short-circuiting. That short-circuit is what keeps
+    re-review cost down across the fleet; do not weaken it (issue #49).
+
+    The three exits, and the real incidents each one covers:
+
+    1. ``forced`` — an on-demand ``/vigil review``. The documented escape
+       hatch routed through the same skip and was a no-op (praxislms#263).
+    2. a standing block, or no settled verdict on the current head. These are
+       two shapes of the same deadlock: bioqms-core#1472 left a live
+       CHANGES_REQUESTED at head, praxislms#263 had that same verdict
+       *dismissed* at head. Keying only on "an outstanding CHANGES_REQUESTED
+       exists" would have missed the second; keying only on "no live review at
+       head" would have missed the first. Both are checked.
+    3. ``resolved_threads`` — Vigil threads were resolved during this run, so
+       the evidence the prior verdict rested on has changed.
+    """
+    reasons: list[str] = []
+    if forced:
+        reasons.append(f"explicitly requested ({reason})" if reason else "explicitly requested")
+    if outstanding_blocks:
+        reasons.append(f"{len(outstanding_blocks)} outstanding Vigil block(s) to reconsider")
+    if not settled_verdict_at_head:
+        reasons.append("no live Vigil verdict on the current head")
+    if resolved_threads:
+        reasons.append(f"{resolved_threads} Vigil thread(s) resolved since the last review")
+    return reasons
+
+
 @app.command()
 def review(
     pr_url: str = typer.Argument(help="GitHub PR URL"),
@@ -100,6 +142,14 @@ def review(
     profile: str = typer.Option("default", "--profile", "-p", help="Review profile: default, enterprise"),
     output_json: bool = typer.Option(False, "--json", help="Output raw JSON result"),
     post: bool = typer.Option(False, "--post", help="Post review as GitHub PR comment"),
+    force: bool = typer.Option(
+        False, "--force",
+        help="Review even when no files changed since the last review (on-demand '/vigil review')",
+    ),
+    reason: str = typer.Option(
+        "", "--reason",
+        help="Why this review was requested; recorded in the run log",
+    ),
 ):
     """Review a GitHub pull request with multi-persona specialist team."""
     # Validate profile
@@ -147,12 +197,21 @@ def review(
 
     # --- Pre-review pipeline: incremental review, resolve, dedup ---
     last_sha = None
+    outstanding_blocks: list[dict] = []
+    settled_verdict_at_head = True
     existing_comments: list[dict] = []
     review_diff_text = pr_data["diff"]
 
     if post:
         try:
-            last_sha = get_last_reviewed_sha(owner, repo, pr_number, token)
+            # Sibling of get_last_reviewed_sha that keeps the review *state*
+            # the SHA alone collapses away (issue #49). One fetch, not two.
+            review_state = get_vigil_review_state(
+                owner, repo, pr_number, token, pr_data["head_sha"],
+            )
+            last_sha = review_state.last_reviewed_sha
+            outstanding_blocks = review_state.outstanding_blocks
+            settled_verdict_at_head = review_state.settled_verdict_at_head
         except Exception as e:
             console.print(f"[dim yellow]Could not check previous reviews: {e}[/dim yellow]")
 
@@ -160,6 +219,7 @@ def review(
         console.print(f"[dim]Previous review at commit {last_sha[:7]}[/dim]")
 
         # Resolve threads with "resolved" replies
+        dismissed = 0
         try:
             dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
             if dismissed:
@@ -173,26 +233,43 @@ def review(
                 owner, repo, last_sha, pr_data["head_sha"], token,
             )
             if not changed_files:
-                console.print("[dim]No files changed since last review — skipping[/dim]")
-                raise typer.Exit(0)
+                # No new commits. Ordinarily that means there is nothing to say
+                # and skipping is correct — but a PR can be sitting on a verdict
+                # only a fresh review can clear, and until this gate existed
+                # there was no way back in (issue #49).
+                reasons = _rereview_reasons(
+                    forced=force,
+                    reason=reason,
+                    outstanding_blocks=outstanding_blocks,
+                    settled_verdict_at_head=settled_verdict_at_head,
+                    resolved_threads=dismissed,
+                )
+                if not reasons:
+                    console.print("[dim]No files changed since last review — skipping[/dim]")
+                    raise typer.Exit(0)
+                console.print(
+                    "[dim]No files changed since last review, but re-reviewing: "
+                    f"{'; '.join(reasons)}[/dim]"
+                )
+            else:
+                console.print(f"[dim]Incremental review: {len(changed_files)} file(s) changed since {last_sha[:7]}[/dim]")
 
-            console.print(f"[dim]Incremental review: {len(changed_files)} file(s) changed since {last_sha[:7]}[/dim]")
-
-            # Auto-resolve threads at changed lines
-            # Build line map ONLY for changed files (to auto-resolve outdated threads)
-            incremental_lines = commentable_lines(pr_data["diff"])
-            changed_set = set(changed_files)
-            changed_line_map = {f: lines for f, lines in incremental_lines.items() if f in changed_set}
-            resolved = resolve_addressed_threads(
-                owner, repo, pr_number, token, changed_line_map,
-            )
-            if resolved:
-                console.print(f"[dim]Auto-resolved {resolved} outdated thread(s)[/dim]")
+                # Auto-resolve threads at changed lines
+                # Build line map ONLY for changed files (to auto-resolve outdated threads)
+                incremental_lines = commentable_lines(pr_data["diff"])
+                changed_set = set(changed_files)
+                changed_line_map = {f: lines for f, lines in incremental_lines.items() if f in changed_set}
+                resolved = resolve_addressed_threads(
+                    owner, repo, pr_number, token, changed_line_map,
+                )
+                if resolved:
+                    console.print(f"[dim]Auto-resolved {resolved} outdated thread(s)[/dim]")
 
             # IMPORTANT: Review the FULL PR diff, not just changed files.
             # This ensures we see all commits in the PR, not just the latest one.
             # The full diff is against the base branch (e.g., main), so it includes
-            # all changes from all commits, which is what we want.
+            # all changes from all commits, which is what we want. This holds for
+            # every re-review path above, including the no-new-commits ones.
             review_diff_text = pr_data["diff"]
 
         except typer.Exit:
@@ -294,16 +371,63 @@ def review(
             except Exception as e:
                 console.print(f"[dim yellow]Could not create observation issues: {e}[/dim yellow]")
 
+        review_posted = False
+        post_outcome: dict = {}
         try:
             review_url = post_review(
                 owner, repo, pr_number, result, token,
                 diff=pr_data["diff"],
                 existing_comments=existing_comments or None,
                 observation_issues=observation_issues,
+                outcome=post_outcome,
             )
             console.print(f"[green]Review posted:[/green] {review_url}")
+            review_posted = True
         except Exception as e:
             console.print(f"[red]Error posting review:[/red] {e}")
+
+        # --- Withdraw Vigil's own stale blocks (issue #48) ---
+        # Only ever on the way UP: an APPROVE that GitHub actually accepted AS
+        # an approval. Three guards, all of which must hold, and all phrased
+        # positively so that missing or unexpected data fails closed:
+        #   1. the replacement review posted without raising,
+        #   2. this run's verdict is APPROVE,
+        #   3. GitHub accepted it as event=APPROVE — NOT a degraded COMMENT or
+        #      an issue-comment fallback. A COMMENT review does not clear a
+        #      block, so dismissing the old one there would leave the PR
+        #      completely unguarded. That is the worst failure mode available
+        #      in this change, hence the explicit equality check.
+        # A REQUEST_CHANGES verdict deliberately changes nothing: Vigil
+        # standing its ground is correct, and the escalation path exists for it.
+        if review_posted and result.decision == "APPROVE":
+            if post_outcome.get("submitted_event") == "APPROVE":
+                head_sha = pr_data["head_sha"]
+                # Belt and braces: dismiss_stale_vigil_blocks is written not to
+                # raise, but this cleanup must never be able to fail a review
+                # that has already posted. Vigil gates merges fleet-wide.
+                try:
+                    dismissed_ids = dismiss_stale_vigil_blocks(
+                        owner, repo, pr_number, token,
+                        message=(
+                            f"Superseded: Vigil re-reviewed {head_sha} and approved. "
+                            "This blocking review is withdrawn by its author."
+                        ),
+                    )
+                    if dismissed_ids:
+                        console.print(
+                            f"[dim]Dismissed {len(dismissed_ids)} stale Vigil block(s) "
+                            f"superseded by the approval at {head_sha[:7]}[/dim]"
+                        )
+                except Exception as e:
+                    console.print(
+                        f"[dim yellow]Could not dismiss stale Vigil block(s): {e}[/dim yellow]"
+                    )
+            else:
+                console.print(
+                    "[dim yellow]Approval did not post as an APPROVE event "
+                    f"({post_outcome.get('submitted_event', 'unknown')}) — "
+                    "leaving prior Vigil blocks in place[/dim yellow]"
+                )
 
         # Swap rocket for final reaction
         if rocket_id:
