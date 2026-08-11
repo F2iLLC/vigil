@@ -20,8 +20,8 @@ PR diff + description + conversation history
                     |
    APPROVE / REQUEST_CHANGES / BLOCK
         |                       |
- inline findings       actionable observations
-                        tracked as GitHub issues
+   findings inline      actionable observations
+  (blocking verdicts)   tracked as GitHub issues
 ```
 
 Each specialist receives only the files relevant to its domain. Security skips documentation, Testing sees tests and related source, and data/GxP reviewers activate only for relevant files in the enterprise profile.
@@ -30,7 +30,7 @@ Each specialist receives only the files relevant to its domain. Security skips d
 
 - **Model-agnostic review** through [LiteLLM](https://github.com/BerriAI/litellm).
 - **Six default specialists plus a lead**, with a seven-specialist enterprise profile for regulated systems.
-- **Inline findings** relocated to a valid changed line when the model cites an un-commentable location.
+- **Inline findings on blocking verdicts only**, relocated to a valid changed line when the model cites an un-commentable location. An approving review reports its findings in the review body, so it never opens a thread it does not intend to block on.
 - **Actionable observation gate** that rejects model-generated praise or notes without a concrete follow-up action.
 - **Automatic issue tracking** for non-blocking observations, with severity-matched priority labels and open-issue deduplication.
 - **PR conversation context** so specialists and the lead can check claims against top-level comments and prior review bodies.
@@ -200,6 +200,29 @@ A re-review that still concludes `REQUEST_CHANGES` changes nothing — Vigil
 standing its ground is intended. Nothing is dismissed when the review degraded
 to a `COMMENT` event, because a comment clears no block and dismissing the old
 one would leave the PR unguarded.
+
+### Inline comments only on a blocking verdict
+
+GitHub renders every inline review comment as an *unresolved review thread*.
+Under a ruleset that requires all threads resolved, a review that approves
+while posting inline comments blocks the pull request it just approved.
+
+So inline placement is reserved for verdicts that block the merge:
+`REQUEST_CHANGES` and `BLOCK`. A review that concludes `APPROVE` — or that
+degrades to a bare `COMMENT` — carries **no** inline comments at all. Its
+findings are reported in the review body under **Advisory Findings**, labeled
+non-blocking, with their original file and line. Nothing the review found is
+dropped; only the thread is. Observations were already summary-only and are
+unchanged.
+
+The suppression holds across every fallback in the posting ladder, including
+the retries that degrade to `COMMENT` and the final plain-issue-comment
+fallback.
+
+Threads opened by *earlier* rounds are not resolved by a later approval on its
+own. They are cleared by the existing lifecycle paths: a resolution reply
+(`vigil dismiss-resolved`), or the cited code changing
+(`vigil resolve-addressed`).
 
 ### Documentation-only PRs
 
@@ -426,7 +449,7 @@ The enterprise profile is a separate seven-specialist team, not the default team
 
 ## Review decisions
 
-- **APPROVE**: no blocking specialist or lead finding remains.
+- **APPROVE**: no blocking specialist or lead finding remains. Any finding the review still carries is reported in the body as a non-blocking advisory note, never as an inline review thread.
 - **REQUEST_CHANGES**: a specialist or lead found a critical/high issue.
 - **BLOCK**: the lead found a fundamental scope, architecture, or coherence problem. GitHub receives this as `REQUEST_CHANGES` because GitHub has no `BLOCK` review event.
 
@@ -485,7 +508,7 @@ The current pipeline:
 7. Run the lead reviewer with specialist results and conversation evidence.
 8. Merge duplicate cross-specialist findings into consensus findings.
 9. Create deduplicated issues for non-blocking observations.
-10. Filter cross-round duplicates and post inline findings with fallbacks.
+10. Filter cross-round duplicates and post the review: findings inline on a blocking verdict, in the body as advisory notes otherwise, with fallbacks.
 
 See [CROSS_ROUND_CONTEXT.md](CROSS_ROUND_CONTEXT.md) for fingerprinting and consensus details.
 
