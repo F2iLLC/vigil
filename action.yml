@@ -193,11 +193,13 @@ runs:
         cmd="${COMMAND:-review}"
         if [ "$cmd" = "review" ]; then
           action_desc="post a review"
+          outcome_desc="NO REVIEW WAS POSTED for this PR."
         else
           action_desc="run its '$cmd' command"
+          outcome_desc="Vigil's '$cmd' step did NOT run for this PR."
         fi
 
-        MESSAGE="Vigil could not $action_desc: the composite action did not complete (install step outcome='${INSTALL_OUTCOME:-unknown}', run step outcome='${RUN_OUTCOME:-unknown}'). NO REVIEW WAS POSTED for this PR. A green or advisory-passed check here does NOT attest that a review happened -- treat this PR as unreviewed by Vigil until the underlying failure is fixed. Commonly caused by a runner python3 that lacks ensurepip/venv support, or a network/install failure; see the 'Install Vigil into a venv' and 'Run Vigil' step logs above for the actual error."
+        MESSAGE="Vigil could not $action_desc: the composite action did not complete (install step outcome='${INSTALL_OUTCOME:-unknown}', run step outcome='${RUN_OUTCOME:-unknown}'). ${outcome_desc} A green or advisory-passed check here does NOT attest that Vigil ran -- treat this PR as unprocessed by Vigil until the underlying failure is fixed. Commonly caused by a runner python3 that lacks ensurepip/venv support, or a network/install failure; see the 'Install Vigil into a venv' and 'Run Vigil' step logs above for the actual error."
 
         echo "::error title=Vigil did not run::${MESSAGE}"
 
@@ -212,6 +214,18 @@ runs:
         # normally installs itself into may not exist at all right now --
         # that is often the failure itself -- so we cannot shell out to the
         # vigil CLI here.
+        #
+        # The comment is reserved for the `review` command only. The
+        # dangerous condition this guard exists to catch is a FALSE
+        # ATTESTATION that a review happened: a green (or advisory-passed)
+        # check with nobody having actually reviewed the PR. dismiss-resolved
+        # and resolve-addressed never create that false attestation -- they
+        # don't post reviews in any outcome -- and resolve-addressed in
+        # particular runs on every `synchronize` event. Commenting there too
+        # would mean up to one comment per command per push, on every open
+        # PR, for as long as the underlying outage lasts (the real #3775
+        # outage ran ~19 hours). Do not widen this past `review` without
+        # solving that spam problem first.
         pr_number=""
         pr_url="${PR_URL_INPUT:-}"
         if [ -z "$pr_url" ]; then
@@ -224,25 +238,50 @@ runs:
           pr_number="${EVENT_PR_NUMBER:-}"
         fi
 
-        if [ -z "$pr_number" ]; then
+        COMMENT_MARKER="<!-- vigil-did-not-run -->"
+
+        if [ "$cmd" != "review" ]; then
+          echo "Command is '$cmd', not 'review' -- skipping the PR comment by design (the annotation, job summary, and review-ran output above already fired)."
+        elif [ -z "$pr_number" ]; then
           echo "No resolvable PR number -- skipping the PR comment to avoid guessing the wrong target."
         elif [ -z "${GITHUB_TOKEN:-}" ]; then
           echo "No github-token available -- skipping the PR comment."
         else
-          comment_body="Vigil did not run on this PR. ${MESSAGE} Do not read this check as a completed review."
-          escaped_body="$(printf '%s' "$comment_body" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
-          json_payload="{\"body\":\"${escaped_body}\"}"
-
-          if curl --fail --silent --show-error -X POST \
+          # Dedup: skip posting if a comment carrying our marker already
+          # exists. Best-effort only -- a GET that errors, times out, or
+          # returns something we don't recognize must fall through to
+          # posting, never go silent. Bounded to one request (no pagination
+          # walk); on a PR with more than 100 prior comments this can miss
+          # an older marker and repost, which is an acceptable degradation
+          # of a best-effort check.
+          already_commented="false"
+          existing_comments="$(curl --silent --max-time 10 \
             -H "Authorization: token ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" \
-            "https://api.github.com/repos/${REPO:-}/issues/${pr_number}/comments" \
-            -d "$json_payload" \
-            -o /dev/null; then
-            echo "Posted a PR comment noting Vigil did not run."
+            "https://api.github.com/repos/${REPO:-}/issues/${pr_number}/comments?per_page=100" \
+            2>/dev/null || true)"
+          if [ -n "$existing_comments" ] && printf '%s' "$existing_comments" | grep -qF "$COMMENT_MARKER"; then
+            already_commented="true"
+          fi
+
+          if [ "$already_commented" = "true" ]; then
+            echo "A 'Vigil did not run' comment already exists on this PR -- skipping to avoid duplicate comments."
           else
-            echo "::warning::Best-effort PR comment failed to post. This warning is only about the comment itself -- see the ::error:: annotation and job summary above for the actual Vigil failure."
+            comment_body="Vigil did not run on this PR. ${MESSAGE} Do not read this check as a completed review. ${COMMENT_MARKER}"
+            escaped_body="$(printf '%s' "$comment_body" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+            json_payload="{\"body\":\"${escaped_body}\"}"
+
+            if curl --fail --silent --show-error --max-time 10 -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPO:-}/issues/${pr_number}/comments" \
+              -d "$json_payload" \
+              -o /dev/null; then
+              echo "Posted a PR comment noting Vigil did not run."
+            else
+              echo "::warning::Best-effort PR comment failed to post. This warning is only about the comment itself -- see the ::error:: annotation and job summary above for the actual Vigil failure."
+            fi
           fi
         fi
 

@@ -318,9 +318,10 @@ Advisory mode only affects merge gating. It does not affect what gets reported, 
 
 - it fails itself, so the run's step list shows a red step even when the job's overall conclusion stays green under advisory mode;
 - it emits an `::error::` workflow annotation naming the failure plainly;
-- it appends the same statement to the job's `$GITHUB_STEP_SUMMARY`;
-- it posts a best-effort PR comment (a plain `curl` call to the GitHub REST API, since the failure can mean Vigil's own venv/package never got installed) stating that Vigil did not run and that the check should not be read as a completed review — only when a PR number can be resolved, to avoid spamming an unrelated context; and
+- it appends the same statement to the job's `$GITHUB_STEP_SUMMARY`; and
 - it sets the `review-ran` output to `false`.
+
+The `review` command additionally gets a best-effort PR comment (a plain `curl` call to the GitHub REST API, since the failure can mean Vigil's own venv/package never got installed), posted only when a PR number can be resolved and skipped if a prior comment on the same PR already carries the `<!-- vigil-did-not-run -->` marker (a single, unpaginated lookup — best-effort, so a failed or unrecognized lookup falls through to posting rather than going silent). `dismiss-resolved` and `resolve-addressed` get the annotation, summary, and `review-ran` output but never the comment: neither posts a review in any outcome, so neither creates the false attestation this guard exists to catch, and `resolve-addressed` in particular runs on every `synchronize` event — commenting there too would mean a new comment on every open PR on every push for as long as an outage lasts.
 
 Real incident: F2iLLC/relara run 30927732554 (root cause tracked fleet-wide as F2iLLC/LunaOS#3775) — the install step failed on a runner whose `python3` lacked `ensurepip`, `Run Vigil` was skipped, and the job still reported success with no review ever posted. F2iLLC/vigil#51 tracks the fix in two parts: `Detect Python` now probes the venv before deciding whether to skip `actions/setup-python`, and this loud-failure guard — so a failure of that kind is now unmissable in the run itself even though it stays non-blocking by default.
 
