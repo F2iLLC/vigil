@@ -260,8 +260,9 @@ The centralized workflow provides:
 - per-PR concurrency cancellation;
 - `SKIP_VIGIL=true`, `skip-vigil`, and `[skip vigil]` controls;
 - model-aware provider-key checks;
-- approval-token warnings; and
-- an advisory mode that keeps provider outages from turning into red CI by default.
+- approval-token warnings;
+- an advisory mode that keeps provider or infrastructure outages from turning into red CI by default (see [Advisory mode and loud failure](#advisory-mode-and-loud-failure)); and
+- a loud-failure guard so an install/run failure is never silently reported as a passing review, even while advisory mode keeps it non-blocking.
 
 Set these repository or organization secrets:
 
@@ -301,7 +302,30 @@ Available inputs:
 | `anthropic-api-key` | Empty | Anthropic provider credential |
 | `openai-api-key` | Empty | OpenAI provider credential |
 
+Outputs:
+
+| Output | Values | Notes |
+| --- | --- | --- |
+| `review-ran` | `true` / `false` | `false` when the venv install or the Run Vigil step did not complete successfully, meaning the requested command (review, dismiss-resolved, or resolve-addressed) never actually executed. A caller can check this explicitly to gate on a real completed review rather than on the job's (possibly advisory-wrapped) conclusion. |
+
 The action uses a suitable system Python 3.10+ when available and falls back to `actions/setup-python`. It installs Vigil into an isolated virtual environment under the runner temporary directory.
+
+### Advisory mode and loud failure
+
+`advisory` (an input on the reusable workflow, default `true`) wraps the composite-action step in `continue-on-error`, so a provider-key gap or an install/run failure does not turn into red, merge-blocking CI by default. This is deliberately not the default the composite action itself would give you if called directly — direct callers get whatever `continue-on-error` they set (or none).
+
+Advisory mode only affects merge gating. It does not affect what gets reported, and it does not affect Vigil's own review verdict when Vigil does run. A final `Verify Vigil actually ran` step in `action.yml` runs with `if: always()` — even after an earlier step in the same composite action failed — and checks whether the install step and the Run Vigil step both actually succeeded. When either did not:
+
+- it fails itself, so the run's step list shows a red step even when the job's overall conclusion stays green under advisory mode;
+- it emits an `::error::` workflow annotation naming the failure plainly;
+- it appends the same statement to the job's `$GITHUB_STEP_SUMMARY`; and
+- it sets the `review-ran` output to `false`.
+
+The `review` command additionally gets a best-effort PR comment (a plain `curl` call to the GitHub REST API, since the failure can mean Vigil's own venv/package never got installed), posted only when a PR number can be resolved and skipped if a prior comment on the same PR already carries the `<!-- vigil-did-not-run -->` marker (a single, unpaginated lookup — best-effort, so a failed or unrecognized lookup falls through to posting rather than going silent). `dismiss-resolved` and `resolve-addressed` get the annotation, summary, and `review-ran` output but never the comment: neither posts a review in any outcome, so neither creates the false attestation this guard exists to catch, and `resolve-addressed` in particular runs on every `synchronize` event — commenting there too would mean a new comment on every open PR on every push for as long as an outage lasts.
+
+Real incident: F2iLLC/relara run 30927732554 (root cause tracked fleet-wide as F2iLLC/LunaOS#3775) — the install step failed on a runner whose `python3` lacked `ensurepip`, `Run Vigil` was skipped, and the job still reported success with no review ever posted. F2iLLC/vigil#51 tracks the fix in two parts: `Detect Python` now probes the venv before deciding whether to skip `actions/setup-python`, and this loud-failure guard — so a failure of that kind is now unmissable in the run itself even though it stays non-blocking by default.
+
+If your repository's branch protection should actually block a merge when Vigil could not run, do not flip the shared `advisory` default — that is a fleet-wide policy change reserved for the workflow's operator, since every F2iLLC repo calls the same reusable workflow. Instead, check the `review-ran` output (or the `::error::` annotation) from your own branch protection or a follow-up job.
 
 ## Webhook server
 

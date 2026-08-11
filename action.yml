@@ -41,6 +41,20 @@ inputs:
     description: "Anthropic API key (required if using claude-* models)"
     required: false
 
+outputs:
+  review-ran:
+    description: >-
+      "true" if the install and Run Vigil steps both completed
+      successfully; "false" if Vigil did not actually run (e.g. the venv
+      install failed) and the requested command was never executed. When
+      "false", a hard ::error:: annotation, a $GITHUB_STEP_SUMMARY entry,
+      and a best-effort PR comment were already emitted by this action
+      regardless of any continue-on-error the caller applies. Callers that
+      want to gate merges on an actual completed review, rather than on
+      this job's advisory-wrapped conclusion, can check this output
+      explicitly.
+    value: ${{ steps.guard.outputs.review-ran }}
+
 runs:
   using: "composite"
   steps:
@@ -104,6 +118,7 @@ runs:
         echo "vigil=$VENV_DIR/bin/vigil" >> "$GITHUB_OUTPUT"
 
     - name: Run Vigil
+      id: run
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github-token }}
@@ -136,3 +151,138 @@ runs:
           fi
           "$VIGIL" review "${ARGS[@]}"
         fi
+
+    # Runs even when earlier steps failed (if: always()) so a broken
+    # install/run never fails silently. See F2iLLC/vigil#51: on a runner
+    # whose python3 lacks ensurepip, "Install Vigil into a venv" fails,
+    # "Run Vigil" is then skipped, and because callers commonly wrap this
+    # action in continue-on-error (the reusable workflow's advisory input),
+    # the job still concludes success with no review ever posted. This step
+    # makes that failure unmissable without touching merge-gating defaults:
+    # it fails itself (so the run's step list shows red), emits a hard
+    # ::error:: annotation, writes to the job summary, and best-effort
+    # posts a PR comment — all independent of whatever continue-on-error
+    # the caller applied to the steps above.
+    - name: Verify Vigil actually ran
+      id: guard
+      if: always()
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        PR_URL_INPUT: ${{ inputs.pr-url }}
+        EVENT_PR_URL: ${{ github.event.pull_request.html_url }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        COMMAND: ${{ inputs.command }}
+        INSTALL_OUTCOME: ${{ steps.install.outcome }}
+        RUN_OUTCOME: ${{ steps.run.outcome }}
+      run: |
+        set -euo pipefail
+
+        review_ran="true"
+        if [ "${INSTALL_OUTCOME:-}" != "success" ] || [ "${RUN_OUTCOME:-}" != "success" ]; then
+          review_ran="false"
+        fi
+
+        echo "review-ran=$review_ran" >> "$GITHUB_OUTPUT"
+
+        if [ "$review_ran" = "true" ]; then
+          exit 0
+        fi
+
+        cmd="${COMMAND:-review}"
+        if [ "$cmd" = "review" ]; then
+          action_desc="post a review"
+          outcome_desc="NO REVIEW WAS POSTED for this PR."
+        else
+          action_desc="run its '$cmd' command"
+          outcome_desc="Vigil's '$cmd' step did NOT run for this PR."
+        fi
+
+        MESSAGE="Vigil could not $action_desc: the composite action did not complete (install step outcome='${INSTALL_OUTCOME:-unknown}', run step outcome='${RUN_OUTCOME:-unknown}'). ${outcome_desc} A green or advisory-passed check here does NOT attest that Vigil ran -- treat this PR as unprocessed by Vigil until the underlying failure is fixed. Commonly caused by a runner python3 that lacks ensurepip/venv support, or a network/install failure; see the 'Install Vigil into a venv' and 'Run Vigil' step logs above for the actual error."
+
+        echo "::error title=Vigil did not run::${MESSAGE}"
+
+        {
+          echo ""
+          echo "### :rotating_light: Vigil did not run"
+          echo ""
+          echo "$MESSAGE"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        # Best-effort PR comment via a plain REST call. The venv Vigil
+        # normally installs itself into may not exist at all right now --
+        # that is often the failure itself -- so we cannot shell out to the
+        # vigil CLI here.
+        #
+        # The comment is reserved for the `review` command only. The
+        # dangerous condition this guard exists to catch is a FALSE
+        # ATTESTATION that a review happened: a green (or advisory-passed)
+        # check with nobody having actually reviewed the PR. dismiss-resolved
+        # and resolve-addressed never create that false attestation -- they
+        # don't post reviews in any outcome -- and resolve-addressed in
+        # particular runs on every `synchronize` event. Commenting there too
+        # would mean up to one comment per command per push, on every open
+        # PR, for as long as the underlying outage lasts (the real #3775
+        # outage ran ~19 hours). Do not widen this past `review` without
+        # solving that spam problem first.
+        pr_number=""
+        pr_url="${PR_URL_INPUT:-}"
+        if [ -z "$pr_url" ]; then
+          pr_url="${EVENT_PR_URL:-}"
+        fi
+        if [ -n "$pr_url" ]; then
+          pr_number="$(printf '%s' "$pr_url" | grep -oE '[0-9]+$' || true)"
+        fi
+        if [ -z "$pr_number" ]; then
+          pr_number="${EVENT_PR_NUMBER:-}"
+        fi
+
+        COMMENT_MARKER="<!-- vigil-did-not-run -->"
+
+        if [ "$cmd" != "review" ]; then
+          echo "Command is '$cmd', not 'review' -- skipping the PR comment by design (the annotation, job summary, and review-ran output above already fired)."
+        elif [ -z "$pr_number" ]; then
+          echo "No resolvable PR number -- skipping the PR comment to avoid guessing the wrong target."
+        elif [ -z "${GITHUB_TOKEN:-}" ]; then
+          echo "No github-token available -- skipping the PR comment."
+        else
+          # Dedup: skip posting if a comment carrying our marker already
+          # exists. Best-effort only -- a GET that errors, times out, or
+          # returns something we don't recognize must fall through to
+          # posting, never go silent. Bounded to one request (no pagination
+          # walk); on a PR with more than 100 prior comments this can miss
+          # an older marker and repost, which is an acceptable degradation
+          # of a best-effort check.
+          already_commented="false"
+          existing_comments="$(curl --silent --max-time 10 \
+            -H "Authorization: token ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO:-}/issues/${pr_number}/comments?per_page=100" \
+            2>/dev/null || true)"
+          if [ -n "$existing_comments" ] && printf '%s' "$existing_comments" | grep -qF "$COMMENT_MARKER"; then
+            already_commented="true"
+          fi
+
+          if [ "$already_commented" = "true" ]; then
+            echo "A 'Vigil did not run' comment already exists on this PR -- skipping to avoid duplicate comments."
+          else
+            comment_body="Vigil did not run on this PR. ${MESSAGE} Do not read this check as a completed review. ${COMMENT_MARKER}"
+            escaped_body="$(printf '%s' "$comment_body" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
+            json_payload="{\"body\":\"${escaped_body}\"}"
+
+            if curl --fail --silent --show-error --max-time 10 -X POST \
+              -H "Authorization: token ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPO:-}/issues/${pr_number}/comments" \
+              -d "$json_payload" \
+              -o /dev/null; then
+              echo "Posted a PR comment noting Vigil did not run."
+            else
+              echo "::warning::Best-effort PR comment failed to post. This warning is only about the comment itself -- see the ::error:: annotation and job summary above for the actual Vigil failure."
+            fi
+          fi
+        fi
+
+        exit 1

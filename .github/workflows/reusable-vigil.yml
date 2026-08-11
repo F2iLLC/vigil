@@ -23,6 +23,24 @@ on:
         required: false
         type: string
         default: '["ubuntu-latest"]'
+      # Advisory mode (default true) is what keeps a Vigil infrastructure
+      # hiccup -- a missing provider key, a broken venv/install, a
+      # transient GitHub API error -- from blocking a merge: the `review`,
+      # `dismiss`, and `resolve-addressed` jobs below all wrap the
+      # `F2iLLC/vigil@...` step in `continue-on-error: ${{ inputs.advisory }}`,
+      # so the job still reports success even on a run where Vigil never
+      # executed. It does NOT protect against, and has no effect on, a
+      # completed-but-wrong review verdict -- Vigil's own
+      # APPROVE/REQUEST_CHANGES/BLOCK decision is unrelated to this flag
+      # either way. When Vigil fails to run at all, the composite action's
+      # own "Verify Vigil actually ran" guard step (action.yml) still fails
+      # loudly regardless of this setting: a hard ::error:: annotation, a
+      # job-summary entry, a best-effort PR comment, and a `review-ran:
+      # false` output are all emitted even though advisory=true keeps that
+      # failure non-blocking for merge gating. Flipping this default to
+      # false turns every Vigil infrastructure outage into a merge blocker
+      # fleet-wide (every F2iLLC repo calls this same workflow) -- that is a
+      # deliberate operator policy decision, not a per-repo or per-PR one.
       advisory:
         description: Keep provider or review failures advisory
         required: false
