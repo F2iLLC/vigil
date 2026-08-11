@@ -51,7 +51,14 @@ def test_readme_documents_every_public_action_input():
         "gemini-api-key",
         "openai-api-key",
         "anthropic-api-key",
+        "context-provider",
+        "context-label",
+        "context-token",
     }
+
+    assert documented_inputs <= set(ACTION_YAML["inputs"]), (
+        "this set must track action.yml's actual inputs"
+    )
 
     for input_name in documented_inputs:
         assert f"| `{input_name}` |" in README
@@ -147,3 +154,60 @@ def test_reusable_workflow_advisory_still_defaults_to_true():
     )
     # The tradeoff must actually be documented, not just preserved.
     assert "advisory" in REUSABLE, "sanity: the input is still present"
+
+
+# --- F2iLLC/vigil#47 (external context provider) --------------------------
+#
+# The provider can be an arbitrary command and can carry an operator token.
+# The issue requires fork safety to be enforced in the workflow, not only in
+# documentation, so these assert the gate structurally: a step that resolves
+# the provider inputs, and action inputs wired through that step's outputs
+# rather than straight from the workflow inputs.
+
+
+def _review_steps():
+    return REUSABLE_YAML["jobs"]["review"]["steps"]
+
+
+def test_reusable_workflow_gates_the_context_provider_on_fork_prs():
+    gate = _find_step(_review_steps(), step_id="context")
+    assert gate is not None, (
+        "reusable-vigil.yml must have a step with id: context that decides "
+        "whether the external context provider is reachable"
+    )
+    assert gate.get("shell") == "bash"
+
+    script = gate["run"]
+    # Positive logic: allowed only on a pull_request whose head repository is
+    # this repository. Everything else -- including issue_comment, where the
+    # payload carries no head-repository provenance -- must fail closed.
+    assert 'allowed="false"' in script, "the gate must default to disabled"
+    assert "github.event.pull_request.head.repo.full_name" in REUSABLE
+    assert '"${HEAD_REPO}" != "${BASE_REPO:-}"' in script
+    assert '"${EVENT_NAME:-}" != "pull_request"' in script
+
+
+def test_context_inputs_reach_the_action_only_through_the_fork_gate():
+    action_step = next(
+        step for step in _review_steps()
+        if str(step.get("uses", "")).startswith("F2iLLC/vigil@")
+    )
+    provided = action_step["with"]
+
+    assert provided["context-provider"] == "${{ steps.context.outputs.provider }}"
+    assert provided["context-label"] == "${{ steps.context.outputs.label }}"
+    assert "steps.context.outputs.allowed == 'true'" in provided["context-token"], (
+        "the opaque provider token must be withheld unless the fork gate allowed it"
+    )
+    # A raw passthrough would defeat the gate entirely.
+    assert "inputs.context-provider" not in str(provided.values())
+
+
+def test_readme_documents_the_fork_constraint_for_external_context():
+    assert "### External review context" in README
+    assert "head.repo.full_name" in README
+    assert "VIGIL_CONTEXT_PROVIDER" in README
+    # The one-opaque-token rule and the fail-open rule are load-bearing
+    # promises of this seam, not incidental prose.
+    assert "VIGIL_CONTEXT_TOKEN" in README
+    assert "Fails open" in README

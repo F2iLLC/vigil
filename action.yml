@@ -35,6 +35,34 @@ inputs:
     description: "Why this review was requested; recorded in the run log"
     required: false
     default: ""
+  context-provider:
+    description: >-
+      Optional external review-context provider: either a command to execute
+      or an http(s) endpoint to POST the PR coordinates to. Invoked once per
+      review; its opaque text output is injected into the review prompt as
+      untrusted evidence and is never parsed by Vigil. Absent, empty,
+      failing, or timed-out providers are ignored and the review proceeds.
+      SECURITY: do not pass this (or context-token) on a pull_request event
+      from a fork -- the reusable workflow gates both off when the PR head
+      repository differs from the base repository, and a direct caller of
+      this action must apply the same gate itself.
+    required: false
+    default: ""
+  context-label:
+    description: >-
+      Optional short label naming the external context source, shown to
+      reviewers so they know where the evidence came from. Flattened to one
+      line and truncated; it cannot introduce prompt structure.
+    required: false
+    default: ""
+  context-token:
+    description: >-
+      One opaque operator-supplied token for the external context provider.
+      Exported to a command provider as VIGIL_CONTEXT_TOKEN, or sent to an
+      HTTP provider as the X-Vigil-Context-Token header. Vigil has no
+      credentials for, and no knowledge of, any specific external system.
+    required: false
+    default: ""
   github-token:
     description: "GitHub token for posting reviews (defaults to GITHUB_TOKEN)"
     required: false
@@ -138,6 +166,13 @@ runs:
         # a shell-injection surface.
         VIGIL_FORCE: ${{ inputs.force }}
         VIGIL_REASON: ${{ inputs.reason }}
+        # External review context (F2iLLC/vigil#47). Env only, never
+        # interpolated into the script body: the provider is an
+        # operator-supplied command string and `${{ }}` inside `run:` is a
+        # shell-injection surface. Unset/empty disables the seam entirely.
+        VIGIL_CONTEXT_PROVIDER: ${{ inputs.context-provider }}
+        VIGIL_CONTEXT_LABEL: ${{ inputs.context-label }}
+        VIGIL_CONTEXT_TOKEN: ${{ inputs.context-token }}
       run: |
         set -euo pipefail
         VIGIL="${{ steps.install.outputs.vigil }}"
