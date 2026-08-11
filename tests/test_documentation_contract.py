@@ -45,6 +45,8 @@ def test_readme_documents_every_public_action_input():
         "model",
         "lead-model",
         "profile",
+        "force",
+        "reason",
         "github-token",
         "gemini-api-key",
         "openai-api-key",

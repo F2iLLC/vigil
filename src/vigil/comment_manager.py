@@ -4,6 +4,7 @@ import difflib
 import logging
 import re
 from collections import defaultdict
+from dataclasses import dataclass, field
 
 import httpx
 
@@ -184,12 +185,182 @@ def build_conversation_context(
 
 
 def get_last_reviewed_sha(owner: str, repo: str, pr_number: int, token: str) -> str | None:
-    """Find the most recent Vigil review and return its commit SHA."""
+    """Find the most recent Vigil review and return its commit SHA.
+
+    NOTE: this deliberately ignores review ``state`` — a DISMISSED review is
+    returned exactly like a live one. That is why it cannot be the only input
+    to the re-review decision; see ``get_vigil_review_state`` (issue #49).
+    """
     reviews = fetch_vigil_reviews(owner, repo, pr_number, token)
     if not reviews:
         return None
     latest = sorted(reviews, key=lambda r: r.get("submitted_at", ""), reverse=True)[0]
     return latest.get("commit_id")
+
+
+# --- Review-state inspection (issue #49) ---------------------------------
+#
+# GitHub review states we care about:
+#   APPROVED           - a standing approval
+#   CHANGES_REQUESTED  - a standing block
+#   COMMENTED          - a non-verdict review (what Vigil degrades to when it
+#                        lacks the write access to APPROVE/REQUEST_CHANGES)
+#   DISMISSED          - a verdict that has been withdrawn, by a human or by
+#                        the branch rule `dismiss_stale_reviews_on_push`.
+#                        Still returned by the reviews API.
+VIGIL_BLOCK_STATE = "CHANGES_REQUESTED"
+
+# States that mean "Vigil has already said its piece about this exact commit
+# and does not need to say it again". A DISMISSED review is excluded because
+# it has been withdrawn — that is the praxislms#263 shape, where the gate
+# could not be reopened even though nothing live remained at head.
+# CHANGES_REQUESTED is excluded because a standing block is precisely the
+# thing Vigil must be able to reconsider — that is the bioqms-core#1472 shape.
+# COMMENTED IS included on purpose: on a repo with no VIGIL_REVIEW_TOKEN every
+# Vigil review degrades to COMMENT, and treating those as unsettled would
+# re-review on every PR event forever.
+_SETTLED_VERDICT_STATES = frozenset({"APPROVED", "COMMENTED"})
+
+
+def _review_state(review: dict) -> str:
+    """Normalized upper-case review state ('' when absent)."""
+    return (review.get("state") or "").strip().upper()
+
+
+def select_outstanding_vigil_blocks(reviews: list[dict]) -> list[dict]:
+    """Vigil reviews still standing as CHANGES_REQUESTED.
+
+    Pure. A review that was later dismissed comes back from the API with
+    state DISMISSED, so filtering on CHANGES_REQUESTED already excludes it.
+    """
+    return [r for r in reviews if _review_state(r) == VIGIL_BLOCK_STATE]
+
+
+def has_settled_vigil_verdict_at(reviews: list[dict], head_sha: str | None) -> bool:
+    """True when Vigil has a live, settled verdict on this exact commit.
+
+    "Settled" means APPROVED or COMMENTED (see ``_SETTLED_VERDICT_STATES``).
+    A DISMISSED review at head does not count, which is what lets a
+    dismissed-verdict head reopen the review gate.
+
+    When ``head_sha`` is unknown this returns True — the conservative answer,
+    because the caller uses it to decide whether to spend a review, and we
+    would rather skip than re-review the world on missing data.
+    """
+    if not head_sha:
+        return True
+    return any(
+        r.get("commit_id") == head_sha and _review_state(r) in _SETTLED_VERDICT_STATES
+        for r in reviews
+    )
+
+
+@dataclass(frozen=True)
+class VigilReviewState:
+    """Everything the re-review decision needs, from a single reviews fetch."""
+
+    last_reviewed_sha: str | None = None
+    outstanding_blocks: list[dict] = field(default_factory=list)
+    settled_verdict_at_head: bool = True
+
+
+def get_vigil_review_state(
+    owner: str, repo: str, pr_number: int, token: str, head_sha: str | None = None,
+) -> VigilReviewState:
+    """Fetch Vigil's reviews once and summarize them for the review gate.
+
+    Sibling of ``get_last_reviewed_sha`` (whose signature is unchanged because
+    other callers depend on it). This one keeps the review ``state`` that
+    ``get_last_reviewed_sha`` collapses away.
+    """
+    reviews = fetch_vigil_reviews(owner, repo, pr_number, token)
+    if not reviews:
+        return VigilReviewState()
+    latest = sorted(reviews, key=lambda r: r.get("submitted_at", ""), reverse=True)[0]
+    return VigilReviewState(
+        last_reviewed_sha=latest.get("commit_id"),
+        outstanding_blocks=select_outstanding_vigil_blocks(reviews),
+        settled_verdict_at_head=has_settled_vigil_verdict_at(reviews, head_sha),
+    )
+
+
+def _dismiss_review(
+    owner: str, repo: str, pr_number: int, review_id: int, message: str, token: str,
+) -> bool:
+    """Dismiss one PR review via the REST dismissal endpoint. Never raises.
+
+    This is the injectable seam for issue #48: tests patch this function to
+    exercise both the accepted and the rejected branch without network access,
+    the same way ``_paginate`` and ``_graphql`` are patched elsewhere.
+
+    OPEN QUESTION (issue #48): GitHub hides self-dismissal in the UI, and
+    whether the REST endpoint permits an identity to dismiss its own review is
+    UNVERIFIED — it has deliberately not been exercised against a live PR. If
+    runtime logs show 403/422 here, the fallback the issue proposes is to
+    perform the dismissal under a second identity (GITHUB_TOKEN rather than
+    VIGIL_REVIEW_TOKEN). That credential switch is NOT implemented here
+    because it is equally untested; adding it blind would trade one unverified
+    path for another. Until then this degrades safely: log and carry on, so a
+    rejected dismissal costs a stale block, never an unguarded PR.
+    """
+    url = (
+        f"https://api.github.com/repos/{owner}/{repo}"
+        f"/pulls/{pr_number}/reviews/{review_id}/dismissals"
+    )
+    try:
+        resp = httpx.put(
+            url,
+            headers=_github_headers(token),
+            json={"message": message, "event": "DISMISS"},
+            timeout=30,
+        )
+    except Exception as e:  # network error, timeout, DNS, ...
+        log.warning("Dismissal request for review %s failed: %s", review_id, e)
+        return False
+
+    if resp.status_code >= 400:
+        # No retry: a 403/422 here is a permission verdict, not a blip, and a
+        # retry storm against a merge-gating control is worse than a stale block.
+        log.warning(
+            "GitHub rejected dismissal of review %s: %s %s",
+            review_id, resp.status_code, (resp.text or "")[:300],
+        )
+        return False
+
+    log.info("Dismissed stale Vigil block (review %s)", review_id)
+    return True
+
+
+def dismiss_stale_vigil_blocks(
+    owner: str, repo: str, pr_number: int, token: str, message: str,
+    reviews: list[dict] | None = None,
+) -> list[int]:
+    """Withdraw every Vigil review still standing as CHANGES_REQUESTED.
+
+    Returns the ids actually dismissed. Never raises — the caller has just put
+    a replacement verdict on record and must not fail the review because the
+    cleanup did not take.
+
+    Callers MUST have posted a genuine replacement approval first; see the
+    guards at the call site in cli.py (issue #48).
+    """
+    try:
+        candidates = (
+            reviews if reviews is not None
+            else fetch_vigil_reviews(owner, repo, pr_number, token)
+        )
+    except Exception as e:
+        log.warning("Could not fetch Vigil reviews to dismiss stale blocks: %s", e)
+        return []
+
+    dismissed: list[int] = []
+    for review in select_outstanding_vigil_blocks(candidates):
+        review_id = review.get("id")
+        if review_id is None:
+            continue
+        if _dismiss_review(owner, repo, pr_number, review_id, message, token):
+            dismissed.append(review_id)
+    return dismissed
 
 
 def _graphql(query: str, variables: dict, token: str) -> dict:

@@ -90,9 +90,17 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            # Reaching this job on an issue_comment means the job-level `if:`
+            # already matched '/vigil review', so this is an explicit on-demand
+            # request. Forward that as --force: without it the run short-circuits
+            # on an unchanged head and posts nothing (F2iLLC/vigil#49).
             echo "url=${{ github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+            echo "force=true" >> "$GITHUB_OUTPUT"
+            echo "reason=on-demand /vigil review comment" >> "$GITHUB_OUTPUT"
           else
             echo "url=${{ github.event.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
+            echo "force=false" >> "$GITHUB_OUTPUT"
+            echo "reason=" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check review provider key
@@ -147,11 +155,19 @@ jobs:
 
       # Pin the composite action independently from this reusable workflow.
       # Update this one reference when a reviewed Vigil implementation lands.
+      #
+      # NOTE: the `force` and `reason` inputs below were added alongside
+      # F2iLLC/vigil#49 and do not exist at the pinned SHA. GitHub treats
+      # unknown composite-action inputs as a warning, not an error, so this is
+      # safe — but the on-demand '/vigil review' fix stays INERT until this pin
+      # is advanced to a commit that contains them.
       - uses: F2iLLC/vigil@0571cd6668c320264f5041d4603675dc88850ad5
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
+          force: ${{ steps.pr.outputs.force }}
+          reason: ${{ steps.pr.outputs.reason }}
           model: ${{ inputs.model }}
           lead-model: ${{ inputs.lead-model }}
           profile: ${{ inputs.profile }}
