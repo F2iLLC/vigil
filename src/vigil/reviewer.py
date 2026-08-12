@@ -9,7 +9,7 @@ from typing import Callable
 from litellm import completion
 
 from .alerts import send_alerts_for_verdicts
-from .diff_parser import diff_summary, filter_hunks, is_documentation_only, parse_diff, reassemble_diff
+from .diff_parser import diff_summary, filter_hunks, parse_diff, reassemble_diff
 from .external_context import ExternalContext, fetch_external_context
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
 from .personas import Persona, ReviewProfile
@@ -437,37 +437,9 @@ def review_diff(
     all_hunks = parse_diff(diff)
     full_summary = diff_summary(all_hunks)
 
-    if is_documentation_only(all_hunks):
-        verdicts = [
-            PersonaVerdict(
-                persona=persona.name,
-                session_id=_gen_session_id(),
-                decision="APPROVE",
-                checks={"documentation_only": "PASS"},
-                findings=[],
-                observations=[],
-            )
-            for persona in profile.specialists
-        ]
-        for verdict in verdicts:
-            if on_specialist_done:
-                on_specialist_done(verdict)
-
-        return ReviewResult(
-            decision="APPROVE",
-            summary="Documentation-only changes detected; Vigil auto-approved without model review.",
-            commit_sha=pr_context.get("head_sha", ""),
-            pr_url=pr_context.get("url", ""),
-            model=model,
-            specialist_verdicts=verdicts,
-            lead_findings=[],
-            observations=[],
-            observation_sources=[],
-        )
     # --- Step 0.5: External review context (F2iLLC/vigil#47) ---
-    # Resolved once per review, after the documentation-only exit (which runs
-    # no prompts at all), and reused for every specialist and the lead. The
-    # provider is best-effort by contract: it must never block or fail a
+    # Resolved once per review and reused for every specialist and the lead.
+    # The provider is best-effort by contract: it must never block or fail a
     # review, so a None here is an ordinary outcome, not a degradation worth
     # reporting to the model.
     external_context = _resolve_external_context(

@@ -34,7 +34,7 @@ Each specialist receives only the files relevant to its domain. Security skips d
 - **Actionable observation gate** that rejects model-generated praise or notes without a concrete follow-up action.
 - **Automatic issue tracking** for non-blocking observations, with severity-matched priority labels and open-issue deduplication.
 - **PR conversation context** so specialists and the lead can check claims against top-level comments and prior review bodies.
-- **Documentation-only fast path** that approves recognized docs-only diffs without calling a model.
+- **No documentation exemption** — Markdown and text changes get the same specialist and lead review as code.
 - **Cross-specialist consensus** that merges duplicate findings into one comment with specialist attribution.
 - **Cross-round deduplication** against active and resolved Vigil comments.
 - **Defensive output handling** that validates structured model responses and sanitizes model-generated Markdown before posting.
@@ -224,9 +224,13 @@ own. They are cleared by the existing lifecycle paths: a resolution reply
 (`vigil dismiss-resolved`), or the cited code changing
 (`vigil resolve-addressed`).
 
-### Documentation-only PRs
+### Documentation PRs
 
-If every changed file is recognized as documentation—Markdown, RST, text, common README/CHANGELOG/LICENSE files, `docs/`, `documentation/`, or GitHub templates—Vigil returns an approval without calling the specialist or lead models.
+Documentation PRs are reviewed like any other diff. There is no fast path and no auto-approval.
+
+Vigil previously short-circuited any diff whose files all matched a documentation predicate, returning an approval with zero model calls. That predicate keyed off the file extension anywhere in the tree, so *every* Markdown or text file qualified — and Markdown is the substrate for governance policy, security procedure, runbooks, ADRs, and confidentiality boundaries, none of which are low-risk by virtue of a file suffix. A PR that committed confidential legal material under a non-docs path was approved green by that path. It has been removed (F2iLLC/vigil#62).
+
+The `is_documentation_path` / `is_documentation_only` classifier is retained for reuse, and narrowed to match its name: a file counts as documentation only when it lives under `docs/`, `documentation/`, `.github/ISSUE_TEMPLATE/`, or a PR-template path, or is a root-level convention file (`README*`, `CHANGELOG*`, `CONTRIBUTING*`, `CODE_OF_CONDUCT*`, `LICENSE*`, `NOTICE*`) **at the repository root**. A bare `*.md`/`*.mdx`/`*.rst`/`*.txt` match at arbitrary depth no longer qualifies. It is a classifier, not a review gate, and must not be wired into one.
 
 ### PR conversation evidence
 
@@ -538,7 +542,7 @@ The current pipeline:
 1. Fetch PR metadata, full diff, top-level comments, and prior reviews.
 2. Locate previous Vigil state for posted re-reviews.
 3. Resolve acknowledged or code-addressed threads.
-4. Parse the full diff and take the documentation-only fast path when eligible.
+4. Parse the full diff into per-file hunks and resolve external review context once.
 5. Route relevant hunks to each specialist sequentially.
 6. Filter known decisions and send optional specialist alerts.
 7. Run the lead reviewer with specialist results and conversation evidence.

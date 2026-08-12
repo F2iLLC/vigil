@@ -707,9 +707,10 @@ class TestExternalContextProviderInReview:
 
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer._call_llm_with_retry")
-    def test_documentation_only_pr_does_not_invoke_the_provider(self, mock_llm, mock_alerts):
-        """Docs-only PRs run no prompts, so there is nothing to supply."""
+    def test_documentation_only_pr_still_invokes_the_provider(self, mock_llm, mock_alerts):
+        """Docs PRs run the normal path now, so context is resolved for them too (#62)."""
         mock_alerts.return_value = 0
+        self._mock_llm_pair(mock_llm)
         calls: list[dict] = []
 
         docs_diff = (
@@ -726,8 +727,9 @@ class TestExternalContextProviderInReview:
             external_context_provider=lambda **kwargs: calls.append(kwargs),
         )
 
-        assert calls == []
-        mock_llm.assert_not_called()
+        assert len(calls) == 1
+        assert calls[0]["changed_paths"] == ["README.md"]
+        assert mock_llm.call_count == 2
 
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer._call_llm_with_retry")
@@ -743,12 +745,19 @@ class TestExternalContextProviderInReview:
         assert mock_fetch.call_count == 1
 
 
-class TestDocumentationOnlyAutoApprove:
+class TestDocumentationPrsAreReviewed:
+    """Documentation PRs get a real review — there is no auto-approve exit (#62).
 
-    @patch("vigil.reviewer.send_alerts_for_verdicts")
-    @patch("vigil.reviewer._call_llm_with_retry")
-    def test_documentation_only_pr_auto_approves_without_llm(self, mock_llm, mock_alerts):
-        profile = ReviewProfile(
+    Vigil used to short-circuit any diff whose files all matched the docs
+    predicate: it synthesized an APPROVE for every specialist with
+    ``checks={"documentation_only": "PASS"}``, made zero model calls, and
+    posted that as a genuine approving review that satisfied branch
+    protection. F2iLLC/LunaOS#4175 shipped confidential legal material through
+    exactly that path. The short-circuit is gone.
+    """
+
+    def _make_profile(self):
+        return ReviewProfile(
             name="test",
             specialists=[
                 Persona(name="Security", focus="Security", system_prompt="Review security"),
@@ -756,7 +765,9 @@ class TestDocumentationOnlyAutoApprove:
             ],
             lead_prompt="Lead",
         )
-        pr_context = {
+
+    def _pr_context(self):
+        return {
             "title": "Update docs",
             "author": "user",
             "head": "docs-branch",
@@ -768,7 +779,18 @@ class TestDocumentationOnlyAutoApprove:
             "head_sha": "abcdef123456",
             "url": "https://github.com/o/r/pull/1",
         }
-        diff = """\
+
+    def _mock_llm(self, mock_llm, specialist_payloads, lead_payload):
+        responses = []
+        for payload in list(specialist_payloads) + [lead_payload]:
+            resp = MagicMock()
+            resp.choices = [MagicMock(message=MagicMock(content=json.dumps(payload)))]
+            responses.append(resp)
+        mock_llm.side_effect = responses
+
+    _APPROVE = {"decision": "APPROVE", "checks": {}, "findings": [], "observations": []}
+
+    _DOCS_DIFF = """\
 diff --git a/docs/setup.md b/docs/setup.md
 index 1111111..2222222 100644
 --- a/docs/setup.md
@@ -778,12 +800,92 @@ index 1111111..2222222 100644
 +New install step
 """
 
-        result = review_diff(diff, pr_context, profile)
+    # The real F2iLLC/LunaOS#4175 shape: Markdown only, but nowhere near a
+    # documentation path — governance/confidentiality material under ai/admin.
+    _NON_DOCS_MARKDOWN_DIFF = """\
+diff --git a/ai/admin/personal/counsel.md b/ai/admin/personal/counsel.md
+index 1111111..2222222 100644
+--- a/ai/admin/personal/counsel.md
++++ b/ai/admin/personal/counsel.md
+@@ -1 +1,3 @@
+ # Counsel
++Named counsel, per-firm decline reasons, standing exclusions
++Contact routes
+"""
 
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_documentation_pr_gets_real_specialist_review(self, mock_llm, mock_alerts):
+        """Even a genuine docs/ change is reviewed by the models now."""
+        mock_alerts.return_value = 0
+        self._mock_llm(
+            mock_llm,
+            [self._APPROVE, self._APPROVE],
+            {"decision": "APPROVE", "summary": "Docs read fine", "findings": []},
+        )
+
+        result = review_diff(self._DOCS_DIFF, self._pr_context(), self._make_profile())
+
+        # Two specialists + the lead were actually asked.
+        assert mock_llm.call_count == 3
         assert result.decision == "APPROVE"
-        assert "Documentation-only" in result.summary
+        assert "Documentation-only" not in result.summary
         assert len(result.specialist_verdicts) == 2
-        assert all(v.decision == "APPROVE" for v in result.specialist_verdicts)
-        assert all(v.checks == {"documentation_only": "PASS"} for v in result.specialist_verdicts)
-        mock_llm.assert_not_called()
-        mock_alerts.assert_not_called()
+        assert all("documentation_only" not in v.checks for v in result.specialist_verdicts)
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_markdown_outside_docs_paths_gets_real_specialist_review(self, mock_llm, mock_alerts):
+        """The #62 regression: an all-Markdown diff off any docs path is reviewed.
+
+        This is the exact failure that triggered the ruling — Vigil returned
+        APPROVE with all specialists green on ``documentation_only: PASS`` and
+        made no model calls at all.
+        """
+        mock_alerts.return_value = 0
+        self._mock_llm(
+            mock_llm,
+            [self._APPROVE, self._APPROVE],
+            {"decision": "APPROVE", "summary": "Reviewed", "findings": []},
+        )
+
+        result = review_diff(
+            self._NON_DOCS_MARKDOWN_DIFF, self._pr_context(), self._make_profile(),
+        )
+
+        assert mock_llm.call_count == 3
+        assert "Documentation-only" not in result.summary
+        assert len(result.specialist_verdicts) == 2
+        # Verdicts are genuine model output, not a synthesized pass.
+        assert all("documentation_only" not in v.checks for v in result.specialist_verdicts)
+        # The diff actually reached the specialists.
+        specialist_prompts = [
+            call.kwargs["messages"][1]["content"] for call in mock_llm.call_args_list
+        ]
+        assert any("ai/admin/personal/counsel.md" in p for p in specialist_prompts)
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_documentation_pr_can_be_blocked(self, mock_llm, mock_alerts):
+        """A docs PR is no longer guaranteed an approval — it can block."""
+        mock_alerts.return_value = 0
+        blocking = {
+            "decision": "REQUEST_CHANGES",
+            "checks": {},
+            "findings": [
+                {"file": "ai/admin/personal/counsel.md", "line": 2, "severity": "high",
+                 "category": "confidentiality", "message": "Commits confidential legal material"}
+            ],
+            "observations": [],
+        }
+        self._mock_llm(
+            mock_llm,
+            [blocking, self._APPROVE],
+            {"decision": "REQUEST_CHANGES", "summary": "Confidentiality boundary", "findings": []},
+        )
+
+        result = review_diff(
+            self._NON_DOCS_MARKDOWN_DIFF, self._pr_context(), self._make_profile(),
+        )
+
+        assert result.decision == "REQUEST_CHANGES"
