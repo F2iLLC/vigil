@@ -21,8 +21,35 @@ class Finding(BaseModel):
     suggestion: str | None = None
 
 
+# Machine-stable values for PersonaVerdict.skip_reason (F2iLLC/vigil#66).
+# These are contract, not prose: they are matched on, not read, so they must
+# stay stable even if the words Vigil renders around them change.
+SKIP_NO_FILES_IN_SCOPE = "no_files_in_scope"
+SKIP_REVIEWER_UNAVAILABLE = "reviewer_unavailable"
+
+
 class PersonaVerdict(BaseModel):
-    """One specialist reviewer's structured verdict."""
+    """One specialist reviewer's structured verdict.
+
+    ``reviewed`` records whether a model was actually asked. Vigil
+    synthesizes an APPROVE verdict for a specialist that never ran — no
+    files matched its patterns, or its model call failed transiently — and
+    every consumer downstream rendered those exactly like a specialist that
+    read the diff and found nothing. A verdict table implies verdicts were
+    reached (F2iLLC/vigil#66): a table of green rows was taken by two
+    automated readers as evidence of a review that had made zero model
+    calls. The flag exists so the *reporting* layer can tell the two apart.
+
+    It is deliberately not consulted by any gating logic. ``decision``
+    remains the only input to ``is_blocking_decision()`` and to the lead's
+    aggregation, so a synthesized APPROVE still does not block a merge —
+    this changes what Vigil says, never what it does.
+
+    ``reviewed`` defaults to True so verdicts parsed from model JSON (the
+    only ones that did run) are unaffected and every existing construction
+    site keeps its meaning. ``skip_reason`` carries one of the SKIP_*
+    constants above whenever ``reviewed`` is False.
+    """
 
     persona: str
     session_id: str = ""  # e.g. "VGL-a3f8b2" — unique per specialist run
@@ -30,6 +57,8 @@ class PersonaVerdict(BaseModel):
     checks: dict[str, str]  # e.g. {"input_validation": "PASS", "injection_prevention": "CONCERN"}
     findings: list[Finding]
     observations: list[Finding]  # non-blocking notes (should become issues per CR-002)
+    reviewed: bool = True  # False => no model call was made for this specialist
+    skip_reason: str = ""  # one of the SKIP_* constants when reviewed is False
 
 
 class ReviewResult(BaseModel):

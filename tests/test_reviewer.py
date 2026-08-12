@@ -558,7 +558,12 @@ class TestTransientSpecialistErrors:
         lead_prompt = lead_messages[1]["content"]
         assert "Observations:" in lead_prompt
         assert "review skipped" in lead_prompt.lower()
-        assert "No findings." in lead_prompt
+        # The per-verdict "No findings." line belongs to a specialist that
+        # actually ran. An unavailable one is now reported to the lead as NOT
+        # REVIEWED instead (F2iLLC/vigil#66) — "no findings" would tell the
+        # lead a clean domain was established when nothing was examined. See
+        # TestLeadPromptReportsSpecialistsThatNeverRan.
+        assert "NOT REVIEWED" in lead_prompt
 
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer._call_llm_with_retry")
