@@ -13,6 +13,17 @@ from .utils import extract_message_content, github_headers, severity_emoji
 
 log = logging.getLogger(__name__)
 
+# The verdicts that actually block a merge. Only these earn inline review
+# threads (issue #52): GitHub renders every inline comment as an unresolved
+# thread, so any other verdict — APPROVE above all — must keep its findings in
+# the review body or it blocks its own PR under a resolve-all-threads ruleset.
+BLOCKING_DECISIONS = frozenset({"REQUEST_CHANGES", "BLOCK"})
+
+
+def is_blocking_decision(decision: str) -> bool:
+    """Return True when a review verdict is one that blocks the merge."""
+    return decision in BLOCKING_DECISIONS
+
 
 def react(owner: str, repo: str, pr_number: int, token: str, content: str) -> int | None:
     """Add a reaction to the PR. Returns the reaction ID (for later removal) or None."""
@@ -159,6 +170,33 @@ def _build_body_findings_section(body_findings: list[tuple[str | None, Finding]]
     return "\n".join(lines)
 
 
+def _build_advisory_findings_section(
+    advisory_findings: list[tuple[str | None, Finding]],
+) -> str:
+    """Build markdown for findings carried by a review that does not block.
+
+    A review whose verdict is neither REQUEST_CHANGES nor BLOCK has, by its
+    own conclusion, found nothing merge-blocking. GitHub renders every inline
+    review comment as an unresolved review thread, so placing these inline
+    would make an approving review block its own PR under a ruleset that
+    requires all threads resolved (issue #52). They are reported here instead,
+    so nothing the review found is lost.
+    """
+    if not advisory_findings:
+        return ""
+    count = len(advisory_findings)
+    lines = [
+        f"### Advisory Findings ({count} non-blocking)\n",
+        "*Not merge-blocking. This review does not request changes, so these "
+        "are reported here as advisory notes rather than as inline review "
+        "threads.*\n",
+    ]
+    for persona, f in advisory_findings:
+        lines.append(_format_finding(f, persona))
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _place_finding_inline(
     f: Finding,
     persona: str | None,
@@ -289,8 +327,17 @@ def post_review(
 ) -> str:
     """Post the review result as a GitHub PR review with inline comments.
 
-    All findings are forced inline where possible. Only falls back to the
-    review body when the diff is completely empty.
+    Inline placement is reserved for verdicts that block the merge
+    (REQUEST_CHANGES / BLOCK). On those, findings are forced inline where
+    possible and only fall back to the review body when no commentable
+    position exists. On any other verdict — APPROVE, or a decision that maps
+    to a bare COMMENT — the review carries **zero** inline comments and its
+    findings are reported in the body as advisory notes (issue #52). GitHub
+    turns every inline comment into an unresolved review thread, so an
+    approving review that posted them would block its own PR wherever a
+    ruleset requires all threads resolved.
+
+    Observations were already summary-only and stay that way.
 
     When multiple specialists flag the same issue, merged findings are posted
     with special formatting showing which specialists flagged the issue.
@@ -351,26 +398,45 @@ def post_review(
         except Exception as e:
             log.debug("Cross-round filtering failed: %s", e)
 
-    # Place all findings inline where possible
+    # --- Step 1: Route findings — inline only on a blocking verdict (#52) ---
+    blocking_verdict = is_blocking_decision(result.decision)
+
     inline_comments: list[dict] = []
     body_findings: list[tuple[str | None, Finding]] = []
+    advisory_findings: list[tuple[str | None, Finding]] = []
 
-    # Specialist findings
-    for v in result.specialist_verdicts:
-        for f in v.findings:
-            comment = _place_finding_inline(f, v.persona, v.session_id, valid_lines)
+    if blocking_verdict:
+        # Place all findings inline where possible
+        # Specialist findings
+        for v in result.specialist_verdicts:
+            for f in v.findings:
+                comment = _place_finding_inline(f, v.persona, v.session_id, valid_lines)
+                if comment:
+                    inline_comments.append(comment)
+                else:
+                    body_findings.append((v.persona, f))
+
+        # Lead findings
+        for f in result.lead_findings:
+            comment = _place_finding_inline(f, "Lead", "", valid_lines)
             if comment:
                 inline_comments.append(comment)
             else:
-                body_findings.append((v.persona, f))
-
-    # Lead findings
-    for f in result.lead_findings:
-        comment = _place_finding_inline(f, "Lead", "", valid_lines)
-        if comment:
-            inline_comments.append(comment)
-        else:
-            body_findings.append((None, f))
+                body_findings.append((None, f))
+    else:
+        # The review's own verdict says nothing here blocks the merge, so
+        # nothing here may open a review thread. Report it all in the body.
+        for v in result.specialist_verdicts:
+            for f in v.findings:
+                advisory_findings.append((v.persona, f))
+        for f in result.lead_findings:
+            advisory_findings.append((None, f))
+        if advisory_findings:
+            log.info(
+                "Verdict %s does not block — reporting %d finding(s) in the review "
+                "body instead of inline (issue #52)",
+                result.decision, len(advisory_findings),
+            )
 
     # Deduplicate against existing Vigil comments
     if existing_comments:
@@ -387,10 +453,26 @@ def post_review(
     if grouped:
         log.info("Grouped %d similar comments into representative comments", grouped)
 
+    def _compose_body(inline_count: int, appended: list[dict] | None = None) -> str:
+        """Build the review body. One composer, so no fallback path drifts.
+
+        ``inline_count`` is what the body claims was posted inline; the
+        fallback ladder passes 0 once the inline comments have been folded
+        into the text via ``appended``.
+        """
+        text = _build_review_body(
+            result, inline_count=inline_count, observation_issues=observation_issues,
+        )
+        if advisory_findings:
+            text += "\n\n" + _build_advisory_findings_section(advisory_findings)
+        if body_findings:
+            text += "\n\n" + _build_body_findings_section(body_findings)
+        for c in appended or []:
+            text += f"\n\n**{c['path']}:{c['line']}**\n{c['body']}"
+        return text
+
     # Build the body
-    body = _build_review_body(result, inline_count=len(inline_comments), observation_issues=observation_issues)
-    if body_findings:
-        body += "\n\n" + _build_body_findings_section(body_findings)
+    body = _compose_body(len(inline_comments))
 
     event_map = {
         "APPROVE": "APPROVE",
@@ -410,13 +492,23 @@ def post_review(
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
     headers = github_headers(token)
 
-    payload: dict = {
+    def _attach_inline(review_payload: dict) -> dict:
+        """Attach inline comments — and only on a blocking verdict (#52).
+
+        Every review-creating attempt below builds its payload through here,
+        so no rung of the fallback ladder can smuggle inline threads back
+        onto a review that does not block. ``inline_comments`` is already
+        empty on that path; this is the second lock on the same door.
+        """
+        if blocking_verdict and inline_comments:
+            review_payload["comments"] = inline_comments
+        return review_payload
+
+    payload: dict = _attach_inline({
         "body": body,
         "event": event,
         "commit_id": result.commit_sha,  # Required for inline comments
-    }
-    if inline_comments:
-        payload["comments"] = inline_comments
+    })
 
     pr_url_fallback = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
 
@@ -424,13 +516,9 @@ def post_review(
     resp = httpx.post(url, headers=headers, json=payload, timeout=30)
     log.info("Attempt 1 (inline+event=%s): %s %s", event, resp.status_code, resp.text[:500])
 
-    if resp.status_code == 422 and inline_comments:
+    if resp.status_code == 422 and payload.get("comments"):
         # --- Attempt 2: Body-only review (inline comments may have bad positions) ---
-        body_with_inlines = _build_review_body(result, inline_count=0)
-        if body_findings:
-            body_with_inlines += "\n\n" + _build_body_findings_section(body_findings)
-        for c in inline_comments:
-            body_with_inlines += f"\n\n**{c['path']}:{c['line']}**\n{c['body']}"
+        body_with_inlines = _compose_body(0, appended=inline_comments)
         resp = httpx.post(
             url, headers=headers,
             json={"body": body_with_inlines, "event": event, "commit_id": result.commit_sha},
@@ -448,23 +536,17 @@ def post_review(
         # From here on the review carries no verdict: a COMMENT review neither
         # approves nor blocks, so it cannot clear a standing CHANGES_REQUESTED.
         submitted_event = "COMMENT"
-        payload_comment: dict = {
+        payload_comment: dict = _attach_inline({
             "body": body,
             "event": "COMMENT",
             "commit_id": result.commit_sha,
-        }
-        if inline_comments:
-            payload_comment["comments"] = inline_comments
+        })
         resp = httpx.post(url, headers=headers, json=payload_comment, timeout=30)
         log.info("Attempt 3 (inline+COMMENT): %s %s", resp.status_code, resp.text[:500])
 
-        if resp.status_code == 422 and inline_comments:
+        if resp.status_code == 422 and payload_comment.get("comments"):
             # --- Attempt 4: COMMENT without inline comments ---
-            body_with_inlines = _build_review_body(result, inline_count=0)
-            if body_findings:
-                body_with_inlines += "\n\n" + _build_body_findings_section(body_findings)
-            for c in inline_comments:
-                body_with_inlines += f"\n\n**{c['path']}:{c['line']}**\n{c['body']}"
+            body_with_inlines = _compose_body(0, appended=inline_comments)
             resp = httpx.post(
                 url, headers=headers,
                 json={"body": body_with_inlines, "event": "COMMENT", "commit_id": result.commit_sha},
