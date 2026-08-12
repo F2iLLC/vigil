@@ -219,10 +219,21 @@ The suppression holds across every fallback in the posting ladder, including
 the retries that degrade to `COMMENT` and the final plain-issue-comment
 fallback.
 
-Threads opened by *earlier* rounds are not resolved by a later approval on its
-own. They are cleared by the existing lifecycle paths: a resolution reply
-(`vigil dismiss-resolved`), or the cited code changing
-(`vigil resolve-addressed`).
+Threads opened by *earlier* rounds are resolved when a later review approves —
+by the decision, not by the diff. The diff-driven path (`resolve-addressed`)
+only ever sees threads whose file changed since the last review, so a thread
+from round 1 on a file round 2 never touches would otherwise sit unresolved
+forever under an approving review, since dedup also stops the finding being
+re-posted (F2iLLC/vigil#61).
+
+This runs only when GitHub actually accepted the review as an `APPROVE` event —
+never on a review that degraded to `COMMENT` or fell back to an issue comment,
+which approve nothing and would leave the PR blocked with its findings hidden.
+`REQUEST_CHANGES` and `BLOCK` resolve nothing. The scope is every one of
+*Vigil's* still-open threads on the PR, matched by the `VGL-` marker in the
+thread body; threads opened by people are never touched. The other lifecycle
+paths still apply: a resolution reply (`vigil dismiss-resolved`), or the cited
+code changing (`vigil resolve-addressed`).
 
 ### Documentation PRs
 
