@@ -160,15 +160,45 @@ class TestCommentableLinesIntegration:
 
 class TestDocumentationOnlyDetection:
 
-    def test_markdown_and_docs_paths_are_documentation(self):
-        assert is_documentation_path("README.md")
+    def test_documentation_paths_are_documentation(self):
         assert is_documentation_path("docs/setup/install.md")
+        assert is_documentation_path("documentation/guide.rst")
         assert is_documentation_path(".github/ISSUE_TEMPLATE/bug.md")
         assert is_documentation_path(".github/PULL_REQUEST_TEMPLATE/release.md")
+        assert is_documentation_path(".github/pull_request_template.md")
+
+    def test_root_convention_files_are_documentation(self):
+        assert is_documentation_path("README.md")
+        assert is_documentation_path("README")
+        assert is_documentation_path("CHANGELOG.md")
+        assert is_documentation_path("CONTRIBUTING.md")
+        assert is_documentation_path("CODE_OF_CONDUCT.md")
+        assert is_documentation_path("LICENSE")
+        assert is_documentation_path("NOTICE.txt")
 
     def test_runtime_path_is_not_documentation(self):
         assert not is_documentation_path("src/app.py")
         assert not is_documentation_path("packages/core/src/index.ts")
+
+    def test_markdown_outside_a_documentation_path_is_not_documentation(self):
+        """A bare extension match at arbitrary depth must not qualify (#62).
+
+        Markdown carries governance policy, security procedure, and
+        confidentiality boundaries. `ai/admin/personal/` is the real path from
+        F2iLLC/LunaOS#4175, where confidential legal material shipped under a
+        "documentation-only" approval.
+        """
+        assert not is_documentation_path("ai/admin/personal/counsel.md")
+        assert not is_documentation_path("src/some/deep/path/notes.md")
+        assert not is_documentation_path("ai/admin/personal/board.mdx")
+        assert not is_documentation_path("policy/security-procedure.rst")
+        assert not is_documentation_path("config/secrets.txt")
+
+    def test_root_convention_names_do_not_qualify_at_depth(self):
+        """`README*` is a root convention, not a name that travels (#62)."""
+        assert not is_documentation_path("ai/admin/personal/README.md")
+        assert not is_documentation_path("packages/core/CHANGELOG.md")
+        assert not is_documentation_path("vendor/dep/LICENSE")
 
     def test_all_documentation_hunks_are_documentation_only(self):
         diff = """\
@@ -207,3 +237,19 @@ index 1111111..2222222 100644
 +print("bye")
 """
         assert not is_documentation_only(parse_diff(diff))
+
+    def test_markdown_outside_docs_paths_is_not_documentation_only(self):
+        """The F2iLLC/LunaOS#4175 diff shape: all-Markdown, no docs path (#62)."""
+        diff = """\
+diff --git a/ai/admin/personal/counsel.md b/ai/admin/personal/counsel.md
+index 1111111..2222222 100644
+--- a/ai/admin/personal/counsel.md
++++ b/ai/admin/personal/counsel.md
+@@ -1 +1,2 @@
+ # Counsel
++Named counsel and per-firm decline reasons
+"""
+        assert not is_documentation_only(parse_diff(diff))
+
+    def test_empty_diff_is_not_documentation_only(self):
+        assert not is_documentation_only([])
