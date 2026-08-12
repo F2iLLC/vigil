@@ -5,7 +5,7 @@ AI-powered, model-agnostic pull-request review with domain-specialist teams.
 Vigil routes a PR diff to focused reviewers, asks a lead reviewer to synthesize their verdicts, posts actionable findings on the relevant diff lines, and can track non-blocking follow-up work as GitHub issues.
 
 > [!IMPORTANT]
-> This README documents `main`. The published `v1.0.0` release and `v1` action tag date from March 2026 and do not include the current review lifecycle, model default, or action hardening. The reusable workflow below follows the reviewed implementation centrally. If you call the composite action directly, use the pinned commit shown here instead of `@v1`.
+> This README documents `main`. The `v1` action tag is a **moving major alias**, repointed only by an explicit release — see [Releases and version pinning](#releases-and-version-pinning) — so it can lag `main` by one or more merged changes. The `Tag drift check` workflow reports the current gap on a schedule. If you need exactly the behaviour documented here, pin the commit shown in the reusable workflow rather than `@v1`.
 
 ## How it works
 
@@ -432,6 +432,63 @@ The `review` command additionally gets a best-effort PR comment (a plain `curl` 
 Real incident: F2iLLC/relara run 30927732554 (root cause tracked fleet-wide as F2iLLC/LunaOS#3775) — the install step failed on a runner whose `python3` lacked `ensurepip`, `Run Vigil` was skipped, and the job still reported success with no review ever posted. F2iLLC/vigil#51 tracks the fix in two parts: `Detect Python` now probes the venv before deciding whether to skip `actions/setup-python`, and this loud-failure guard — so a failure of that kind is now unmissable in the run itself even though it stays non-blocking by default.
 
 If your repository's branch protection should actually block a merge when Vigil could not run, do not flip the shared `advisory` default — that is a fleet-wide policy change reserved for the workflow's operator, since every F2iLLC repo calls the same reusable workflow. Instead, check the `review-ran` output (or the `::error::` annotation) from your own branch protection or a follow-up job.
+
+## Releases and version pinning
+
+Consumers pin the action at `F2iLLC/vigil@v1`. That alias does **not** follow `main` —
+merging a fix here ships nothing until the alias is repointed. Two workflows
+cover that gap, and they are deliberately separate:
+
+| Workflow | Trigger | Effect |
+|---|---|---|
+| `Tag drift check` | push to `main`, daily, manual | **Reports only.** Fails when `v1` lags `main`, or when an in-repo `F2iLLC/vigil@<sha>` self-pin is stale. Never changes a tag. |
+| `Release (move major alias tag)` | push of a `vX.Y.Z` tag, or manual dispatch | Moves the major alias (`v1`) to the released commit, behind the `release` environment gate. |
+
+### Cutting a release
+
+```bash
+git switch main && git pull
+git tag -a v1.2.0 -m "Vigil v1.2.0" && git push origin v1.2.0
+```
+
+Pushing the semver tag is the whole release. The workflow resolves `v1` from
+the tag's major component, runs the full test suite, checks `action.yml`
+inputs for consumer-breaking changes, waits for approval on the `release`
+environment, then force-moves and pushes the annotated `v1`.
+
+`workflow_dispatch` is the escape hatch for moving the alias without cutting a
+number. It defaults to **dry run**; untick it to actually publish.
+
+### Guards
+
+The release refuses to proceed when any of these fail:
+
+- the full `pytest` suite does not pass;
+- an `action.yml` input was removed, or became required (either silently
+  breaks consumer workflows — GitHub *ignores* an undeclared input rather than
+  failing on it, so the consumer's setting just stops taking effect);
+- the target commit is not contained in `main`;
+- the alias would move **backwards**, un-shipping fixes from every consumer at
+  once (override with `--allow-rollback` only if that is genuinely intended).
+
+> [!WARNING]
+> The `release` environment must be created with **required reviewers**.
+> GitHub silently auto-creates an unprotected environment on first use, so
+> without that configuration the approval step provides no protection.
+
+### `v1` is an annotated tag
+
+`git rev-parse v1` returns the **tag object**, not the commit — so comparing it
+against a branch head reports drift that is not there. Always peel it:
+
+```bash
+git rev-parse 'v1^{commit}'          # correct
+.github/scripts/tagctl.sh resolve v1 # same thing, and the only form used in CI
+```
+
+`tagctl.sh` centralises that peel precisely so the mistake cannot recur; it
+also exposes `drift`, `pins`, `plan-move` and `move` (local tag only — it never
+pushes).
 
 ## Webhook server
 
