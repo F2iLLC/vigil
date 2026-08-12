@@ -546,6 +546,59 @@ def resolve_addressed_threads(
     return len(resolved)
 
 
+def resolve_vigil_threads_on_approval(
+    owner: str, repo: str, pr_number: int, token: str,
+) -> int:
+    """Resolve every still-open Vigil thread on a PR Vigil has just approved.
+
+    Decision-driven, not diff-driven — and that is the whole point. Its sibling
+    `resolve_addressed_threads` only ever considers threads whose file appears
+    in the incremental diff since the last review, so a thread opened in an
+    earlier round on a file that later rounds never touch is never revisited.
+    Cross-round dedup then suppresses re-posting the same finding, so nothing
+    re-touches the thread either. The PR is left carrying an unresolved Vigil
+    thread underneath an approving Vigil review, indefinitely — a merge blocker
+    attached to a review that approved the PR, under any "resolve all threads
+    before merge" ruleset (issue #61).
+
+    Scope is ALL of Vigil's own unresolved threads on the PR, deliberately NOT
+    only the current session's. `session_id` is per-SPECIALIST-RUN, not
+    per-review-round (models.py: `PersonaVerdict.session_id`), so threads left
+    over from earlier rounds necessarily carry different session IDs. A
+    current-session-only implementation would therefore resolve nothing in
+    exactly the reported scenario — it would pass its own tests and not fix the
+    reported behavior.
+
+    Vigil's own threads are identified the way the rest of this module
+    identifies them: the `VGL-` marker in the thread body
+    (`VIGIL_SESSION_PATTERN`). That gate is what guarantees human-authored
+    threads are never touched.
+
+    Callers MUST have put a genuine accepted approval on record first; see the
+    guards at the call site in cli.py (issue #61).
+
+    Returns count of resolved threads.
+    """
+    threads = fetch_review_threads(owner, repo, pr_number, token)
+
+    to_resolve: list[str] = []
+    for t in threads:
+        if t["isResolved"]:
+            continue
+        # The VGL gate is the human-thread guard. Never widen it.
+        if not VIGIL_SESSION_PATTERN.search(t.get("body", "")):
+            continue
+        to_resolve.append(t["id"])
+
+    if not to_resolve:
+        return 0
+
+    resolved = resolve_threads_batch(to_resolve, token)
+    for tid in resolved:
+        log.info("Resolved Vigil thread %s on approval", tid)
+    return len(resolved)
+
+
 def _is_resolution_reply(body: str) -> bool:
     """Check if a reply body indicates resolution (keyword, issue link, or combo)."""
     body = body.strip()

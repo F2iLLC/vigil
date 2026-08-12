@@ -93,6 +93,40 @@ def foreign_review(review_id: int, state: str, commit_id: str) -> dict:
     }
 
 
+def vigil_thread(
+    node_id: str, path: str, *, line: int = 10, session: str = "VGL-a3f8b2",
+    resolved: bool = False,
+) -> dict:
+    """A Vigil-authored review thread as the GraphQL reviewThreads query returns it."""
+    body = f"**HIGH** Something is wrong in `{path}`\n\n`{session}`"
+    return {
+        "id": node_id,
+        "isResolved": resolved,
+        "comments": {"nodes": [{
+            "id": node_id + "-c0",
+            "body": body,
+            "path": path,
+            "line": line,
+            "author": {"login": "vigil-reviewer"},
+        }]},
+    }
+
+
+def human_thread(node_id: str, path: str, *, line: int = 10, resolved: bool = False) -> dict:
+    """A thread opened by a person. Vigil must never resolve one of these."""
+    return {
+        "id": node_id,
+        "isResolved": resolved,
+        "comments": {"nodes": [{
+            "id": node_id + "-c0",
+            "body": "Can we rename this before merge?",
+            "path": path,
+            "line": line,
+            "author": {"login": "F2iProject"},
+        }]},
+    }
+
+
 def wire_review(
     monkeypatch,
     *,
@@ -104,14 +138,20 @@ def wire_review(
     omit_outcome: bool = False,
     resolved_threads: int = 0,
     dismiss_ok: bool = True,
+    threads: list[dict] | None = None,
 ):
     """Wire cli.review against fake GitHub I/O, returning a call recorder.
 
     `reviews` is the live list the fake API serves; the fake dismissal endpoint
     mutates it in place the way GitHub would, so multi-run sequences stay
-    faithful.
+    faithful. `threads` does the same for the GraphQL review-thread boundary:
+    the fake resolve mutation flips `isResolved` in place.
     """
-    rec = SimpleNamespace(review_diffs=[], dismissals=[], posted=[], reviews=reviews)
+    threads = [] if threads is None else threads
+    rec = SimpleNamespace(
+        review_diffs=[], dismissals=[], posted=[], reviews=reviews,
+        threads=threads, resolved_thread_ids=[],
+    )
 
     monkeypatch.setenv("GITHUB_TOKEN", "token")
     monkeypatch.setattr(cli, "parse_pr_url", lambda pr_url: ("F2iLLC", "demo", 1))
@@ -137,6 +177,27 @@ def wire_review(
         return []
 
     monkeypatch.setattr(comment_manager, "_paginate", fake_paginate)
+
+    # --- GraphQL boundary for review threads. The real fetch/select/resolve
+    # logic in resolve_vigil_threads_on_approval runs on top of this. ---
+    def fake_graphql(query, variables, token):
+        if query.lstrip().startswith("mutation"):
+            data = {}
+            for var_name, tid in variables.items():
+                rec.resolved_thread_ids.append(tid)
+                for node in threads:
+                    if node["id"] == tid:
+                        node["isResolved"] = True
+                data[f"t{var_name[len('tid'):]}"] = {
+                    "thread": {"id": tid, "isResolved": True}
+                }
+            return {"data": data}
+        return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": threads,
+        }}}}}
+
+    monkeypatch.setattr(comment_manager, "_graphql", fake_graphql)
 
     monkeypatch.setattr(cli, "resolve_dismissed_threads", lambda *a: resolved_threads)
     monkeypatch.setattr(cli, "resolve_addressed_threads", lambda *a, **k: 0)
@@ -611,6 +672,232 @@ class TestApproveDismissesStaleBlocks:
         monkeypatch.setattr(cli, "dismiss_stale_vigil_blocks", boom)
         run_review()  # must not raise
         assert rec.posted == ["APPROVE"]
+
+
+# ---------- issue #61: an approval resolves Vigil's own open threads ----------
+
+class TestApproveResolvesVigilThreads:
+    """Issue #61: nothing resolved a thread because the review APPROVED.
+
+    `resolve_addressed_threads` is diff-driven — it only considers threads whose
+    file appears in the incremental diff since the last review. So a thread
+    opened in round 1 on a file that round 2 never touches is never revisited,
+    cross-round dedup stops the finding being re-posted, and the PR is left
+    carrying an unresolved Vigil thread underneath an approving Vigil review.
+
+    The issue tells this with foo.py and bar.py; here they are `file_a.py` (the
+    stranded file) and `file_b.py` (the only file this round touched), because
+    those are the two files in FULL_DIFF.
+
+    Scope note: this resolves ALL of Vigil's open threads, not the current
+    session's. session_id is per-SPECIALIST-RUN (models.py), so an earlier
+    round's threads necessarily carry different session IDs — a
+    current-session-only filter would resolve nothing here.
+    """
+
+    def test_premise_the_incremental_resolver_cannot_reach_the_stranded_thread(
+        self, monkeypatch,
+    ):
+        """Premise for the regression below, asserted before the fix is asserted.
+
+        The diff-driven path is keyed on the thread's file being in this round's
+        changed set, so a file_a.py thread is simply invisible to a round that
+        touched only file_b.py. No amount of re-running it clears the thread.
+        """
+        monkeypatch.setattr(
+            comment_manager, "fetch_review_threads",
+            lambda *a: [{
+                "id": "T-a", "isResolved": False, "path": "file_a.py", "line": 10,
+                "body": "Finding `VGL-a3f8b2`",
+                "comments": [{"body": "Finding `VGL-a3f8b2`",
+                              "author": {"login": "vigil-reviewer"}}],
+            }],
+        )
+        monkeypatch.setattr(
+            comment_manager, "resolve_threads_batch", lambda ids, token: ids,
+        )
+        assert comment_manager.resolve_addressed_threads(
+            "F2iLLC", "demo", 1, "token", {"file_b.py": {3}},
+        ) == 0
+
+    def test_approve_resolves_a_thread_left_open_by_an_earlier_round(self, monkeypatch):
+        """The reported regression, end to end.
+
+        Round 1 blocked and opened a thread on file_a.py. This round touches
+        only file_b.py and approves. The file_a.py thread must be resolved.
+        """
+        threads = [vigil_thread("T-a", "file_a.py", session="VGL-a3f8b2")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"],
+            decision="APPROVE",
+            threads=threads,
+        )
+        # Let the REAL diff-driven resolver run, so nothing about the incremental
+        # path is faked away: it must not be what clears the thread.
+        monkeypatch.setattr(
+            cli, "resolve_addressed_threads", comment_manager.resolve_addressed_threads,
+        )
+
+        run_review()
+
+        assert rec.posted == ["APPROVE"]
+        assert rec.resolved_thread_ids == ["T-a"]
+        assert threads[0]["isResolved"] is True
+
+    def test_approve_resolves_threads_from_several_earlier_sessions(self, monkeypatch):
+        """session_id is per-specialist-run, so one round can strand several."""
+        threads = [
+            vigil_thread("T-a", "file_a.py", session="VGL-a3f8b2"),
+            vigil_thread("T-b", "file_a.py", line=20, session="VGL-b1c2d3"),
+        ]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE", threads=threads,
+        )
+        run_review()
+        assert sorted(rec.resolved_thread_ids) == ["T-a", "T-b"]
+
+    def test_human_threads_are_never_resolved(self, monkeypatch):
+        """The VGL marker gate is the only thing standing between Vigil and a
+        person's review thread. Resolving one would be a far worse defect than
+        the one being fixed."""
+        threads = [
+            human_thread("H-1", "file_a.py"),
+            vigil_thread("T-a", "file_a.py", line=20),
+        ]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE", threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == ["T-a"]
+        assert threads[0]["isResolved"] is False
+
+    def test_no_resolution_when_review_degraded_to_comment(self, monkeypatch):
+        """A COMMENT review approves nothing. Clearing the threads there would
+        hide every visible finding while the PR stays blocked — strictly worse
+        than the bug this fixes."""
+        threads = [vigil_thread("T-a", "file_a.py")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE",
+            submitted_event="COMMENT", threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == []
+        assert threads[0]["isResolved"] is False
+
+    def test_no_resolution_when_review_fell_back_to_an_issue_comment(self, monkeypatch):
+        threads = [vigil_thread("T-a", "file_a.py")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE",
+            submitted_event="ISSUE_COMMENT", threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == []
+
+    def test_no_resolution_when_the_outcome_is_unknown(self, monkeypatch):
+        """Fails closed: an unpopulated outcome must not authorize resolution."""
+        threads = [vigil_thread("T-a", "file_a.py")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE",
+            omit_outcome=True, threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == []
+
+    @pytest.mark.parametrize("decision", ["REQUEST_CHANGES", "BLOCK"])
+    def test_blocking_verdict_resolves_nothing(self, monkeypatch, decision):
+        """REQUEST_CHANGES deliberately changes nothing: the findings stand."""
+        threads = [vigil_thread("T-a", "file_a.py")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision=decision, threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == []
+        assert threads[0]["isResolved"] is False
+
+    def test_verdict_guard_holds_independently_of_the_event_guard(self, monkeypatch):
+        """As with the dismissal guards: force the pathological pairing so the
+        verdict check is proven load-bearing on its own."""
+        threads = [vigil_thread("T-a", "file_a.py")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="REQUEST_CHANGES",
+            submitted_event="APPROVE", threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == []
+
+    def test_no_resolution_when_posting_the_approval_raised(self, monkeypatch):
+        threads = [vigil_thread("T-a", "file_a.py")]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE", threads=threads,
+        )
+
+        def boom(*a, **k):
+            raise httpx.HTTPError("review submission failed")
+
+        monkeypatch.setattr(cli, "post_review", boom)
+        run_review()
+        assert rec.resolved_thread_ids == []
+
+    def test_already_resolved_threads_are_left_alone(self, monkeypatch):
+        threads = [vigil_thread("T-a", "file_a.py", resolved=True)]
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE", threads=threads,
+        )
+        run_review()
+        assert rec.resolved_thread_ids == []
+
+    def test_resolver_failure_does_not_fail_the_review(self, monkeypatch):
+        """Vigil gates merges fleet-wide: cleanup can never fail a posted review."""
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE",
+            threads=[vigil_thread("T-a", "file_a.py")],
+        )
+
+        def boom(*a, **k):
+            raise httpx.HTTPStatusError("403", request=MagicMock(), response=MagicMock())
+
+        monkeypatch.setattr(cli, "resolve_vigil_threads_on_approval", boom)
+        run_review()  # must not raise
+        assert rec.posted == ["APPROVE"]
+
+    def test_a_graphql_outage_does_not_fail_the_review(self, monkeypatch):
+        """The same, one layer down: the transport itself failing."""
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"], decision="APPROVE",
+            threads=[vigil_thread("T-a", "file_a.py")],
+        )
+
+        def boom(*a, **k):
+            raise httpx.HTTPError("graphql unreachable")
+
+        monkeypatch.setattr(comment_manager, "_graphql", boom)
+        run_review()  # must not raise
+        assert rec.posted == ["APPROVE"]
+        assert rec.resolved_thread_ids == []
 
 
 class TestStaleDismissalResurrection:
