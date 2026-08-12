@@ -31,6 +31,7 @@ from .issue_manager import create_issues_for_observations
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
 from .personas import PROFILES
 from .reviewer import review_diff
+from .utils import NOT_REVIEWED_ICON, NOT_REVIEWED_LABEL, not_reviewed_reason_text
 
 load_dotenv(override=True)
 app = typer.Typer(name="vigil", help="AI-powered, model-agnostic PR review tool.")
@@ -52,7 +53,25 @@ DECISION_COLORS = {
 
 
 def _print_specialist_done(verdict: PersonaVerdict):
-    """Callback: print a line as each specialist finishes."""
+    """Callback: print a line as each specialist finishes.
+
+    A specialist that made no model call is never printed green, never as
+    APPROVE, and above all never as "clean" — the zero-findings fallback
+    below said exactly that about a domain nobody examined (F2iLLC/vigil#66).
+    This is the surface an operator watches live while deciding whether to
+    trust a run, so it reports a skip the same way the posted review body
+    does: the reason takes the slot "clean" used to occupy.
+    """
+    if not verdict.reviewed:
+        sid = f" [dim]{verdict.session_id}[/dim]" if verdict.session_id else ""
+        reason = not_reviewed_reason_text(verdict.skip_reason)
+        detail = f" - {reason}" if reason else ""
+        console.print(
+            f"  [yellow]{NOT_REVIEWED_ICON} {NOT_REVIEWED_LABEL}[/yellow] "
+            f"{verdict.persona}{sid}{detail}"
+        )
+        return
+
     color = "green" if verdict.decision == "APPROVE" else "red"
     n = len(verdict.findings)
     obs = len(verdict.observations)
@@ -93,6 +112,26 @@ def _print_findings(findings: list[Finding], title: str):
         for f in suggestions:
             loc = f.file + (f":{f.line}" if f.line else "")
             console.print(f"  [dim]{loc}[/dim] -> {f.suggestion}")
+
+
+def _print_summary_stats(result: ReviewResult):
+    """Print the one-line tally that closes a console review.
+
+    A specialist that never ran did not approve anything, so it is excluded
+    from the approval count and reported separately (F2iLLC/vigil#66) —
+    "6/6 specialists approved" was the same false green as the verdict table,
+    just in prose. Wording is kept in step with the identical tally in
+    ``github_review._build_review_body()``.
+    """
+    total_findings = sum(len(v.findings) for v in result.specialist_verdicts) + len(result.lead_findings)
+    total_obs = len(result.observations)
+    approvals = sum(
+        1 for v in result.specialist_verdicts if v.reviewed and v.decision == "APPROVE"
+    )
+    total = len(result.specialist_verdicts)
+    not_run = sum(1 for v in result.specialist_verdicts if not v.reviewed)
+    not_run_note = f" · {not_run} not reviewed" if not_run else ""
+    console.print(f"\n[dim]{approvals}/{total} specialists approved{not_run_note} · {total_findings} findings · {total_obs} observations[/dim]")
 
 
 def _rereview_reasons(
@@ -346,11 +385,7 @@ def review(
             console.print(f"  [dim]{loc}[/dim] [{obs.category}] {obs.message}")
 
     # Summary stats
-    total_findings = sum(len(v.findings) for v in result.specialist_verdicts) + len(result.lead_findings)
-    total_obs = len(result.observations)
-    approvals = sum(1 for v in result.specialist_verdicts if v.decision == "APPROVE")
-    total = len(result.specialist_verdicts)
-    console.print(f"\n[dim]{approvals}/{total} specialists approved · {total_findings} findings · {total_obs} observations[/dim]")
+    _print_summary_stats(result)
 
     # Post to GitHub
     if post:

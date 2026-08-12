@@ -9,7 +9,13 @@ import httpx
 from .comment_manager import deduplicate_comments
 from .diff_parser import commentable_lines, find_best_file_for_finding, nearest_commentable_line
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
-from .utils import extract_message_content, github_headers, severity_emoji
+from .utils import (
+    NOT_REVIEWED_ICON,
+    extract_message_content,
+    github_headers,
+    not_reviewed_label,
+    severity_emoji,
+)
 
 log = logging.getLogger(__name__)
 
@@ -18,6 +24,24 @@ log = logging.getLogger(__name__)
 # thread, so any other verdict — APPROVE above all — must keep its findings in
 # the review body or it blocks its own PR under a resolve-all-threads ruleset.
 BLOCKING_DECISIONS = frozenset({"REQUEST_CHANGES", "BLOCK"})
+
+
+# Machine-readable marker naming the specialists that never ran, appended to
+# the review body so downstream automation can detect a partial review without
+# substring-matching prose. Mirrors the `<!-- vigil-did-not-run -->` marker the
+# composite action posts when Vigil itself could not run (#51 item 1); this is
+# the same promise at specialist granularity (F2iLLC/vigil#66). Emitted only
+# when at least one specialist was skipped, so its mere presence is the signal.
+#
+# Scope is exactly "skipped" (PersonaVerdict.reviewed False): no files in
+# scope, or a transiently unavailable reviewer. A specialist whose model call
+# failed non-transiently is reported separately as decision="ERROR" and is
+# deliberately NOT listed here — that row already renders as ⚠️ ERROR with a
+# reviewer_error finding, which no reader mistakes for a completed review.
+# So absence from this marker does NOT mean a specialist produced a verdict;
+# automation that needs "did every specialist actually reach a conclusion?"
+# must check the ERROR decision too.
+SPECIALISTS_NOT_RUN_MARKER = "vigil-specialists-not-run"
 
 
 def is_blocking_decision(decision: str) -> bool:
@@ -72,8 +96,22 @@ def _build_review_body(
     inline_count: int = 0,
     observation_issues: list[tuple[Finding, str]] | None = None,
 ) -> str:
-    """Build the review body. Findings posted inline are excluded from the body."""
+    """Build the review body. Findings posted inline are excluded from the body.
+
+    Specialists that made no model call (``PersonaVerdict.reviewed`` False)
+    are rendered as NOT REVIEWED rather than as the APPROVE their decision
+    still carries \u2014 a verdict table implies verdicts were reached, and a
+    synthesized green row was read as a completed review by two automated
+    readers in F2iLLC/vigil#66. Their ``decision`` is untouched, so merge
+    gating is byte-for-byte what it was; only what this body *says* changes.
+    """
     sections = []
+
+    # Which specialists actually got a model call (F2iLLC/vigil#66). Computed
+    # once \u2014 the header line, the verdict table, the footer tally and the
+    # machine-readable marker must all tell the same story.
+    not_run = [v for v in result.specialist_verdicts if not v.reviewed]
+    any_reviewed = any(v.reviewed for v in result.specialist_verdicts)
 
     # Header
     decision_emoji = {"APPROVE": "\u2705", "REQUEST_CHANGES": "\u274c", "BLOCK": "\U0001f6ab"}
@@ -81,13 +119,36 @@ def _build_review_body(
     sections.append(f"## {emoji} Vigil Review: **{result.decision}**\n")
     if result.commit_sha:
         short_sha = result.commit_sha[:7]
-        sections.append(f"*Reviewed commit `{short_sha}` with `{result.model}`*\n")
+        if not_run and not any_reviewed:
+            # Every specialist was skipped, so this line's boilerplate claim
+            # ("Reviewed commit X with Y") would be false \u2014 #66 calls it out
+            # as printed whether or not the model was called. The model is
+            # still named: it is what an operator needs to debug the skip.
+            sections.append(
+                f"*No specialist reviewed commit `{short_sha}` \u2014 every specialist was "
+                f"skipped, so `{result.model}` was never asked about this diff.*\n"
+            )
+        else:
+            # Unchanged whenever at least one specialist ran, and also when no
+            # specialists are configured at all: nothing was skipped there, so
+            # there is no false green to correct.
+            sections.append(f"*Reviewed commit `{short_sha}` with `{result.model}`*\n")
     sections.append(f"{result.summary}\n")
 
     # Specialist verdicts summary
     sections.append("### Specialist Verdicts\n")
     verdict_lines = []
     for v in result.specialist_verdicts:
+        if not v.reviewed:
+            # No model call was made for this specialist. No check-mark, and
+            # never the word APPROVE \u2014 this row must be unmistakable.
+            sid = f" `{v.session_id}`" if v.session_id else ""
+            verdict_lines.append(
+                f"| {NOT_REVIEWED_ICON} | **{v.persona}**{sid} | "
+                f"{not_reviewed_label(v.skip_reason)} |"
+            )
+            continue
+
         icon = "\u2705" if v.decision == "APPROVE" else "\u274c" if v.decision == "REQUEST_CHANGES" else "\u26a0\ufe0f"
         n_findings = len(v.findings)
         n_obs = len(v.observations)
@@ -150,11 +211,25 @@ def _build_review_body(
 
     # Footer
     total_findings = sum(len(v.findings) for v in result.specialist_verdicts) + len(result.lead_findings)
-    approvals = sum(1 for v in result.specialist_verdicts if v.decision == "APPROVE")
+    # A specialist that never ran did not approve anything. Counting it in the
+    # tally reproduced the same false green the table used to carry, in prose
+    # ("6/6 specialists approved") \u2014 so it is counted separately (#66).
+    approvals = sum(
+        1 for v in result.specialist_verdicts if v.reviewed and v.decision == "APPROVE"
+    )
     total = len(result.specialist_verdicts)
     inline_note = f" \u00b7 {inline_count} inline comments" if inline_count else ""
-    sections.append(f"---\n*{approvals}/{total} specialists approved \u00b7 {total_findings} findings \u00b7 {len(result.observations)} observations{inline_note}*  ")
+    not_run_note = f" \u00b7 {len(not_run)} not reviewed" if not_run else ""
+    sections.append(f"---\n*{approvals}/{total} specialists approved{not_run_note} \u00b7 {total_findings} findings \u00b7 {len(result.observations)} observations{inline_note}*  ")
     sections.append("*Reviewed by [Vigil](https://github.com/F2iProject/vigil) \u2014 AI-powered, model-agnostic PR review*")
+
+    # Machine-readable marker for the specialists that never ran (#66 asks for
+    # this explicitly). Downstream automation gets a stable thing to match on
+    # instead of parsing the prose above, which is free to change. Nothing is
+    # emitted when every specialist ran, so presence alone is the signal.
+    if not_run:
+        skipped_names = ",".join(v.persona for v in not_run)
+        sections.append(f"\n<!-- {SPECIALISTS_NOT_RUN_MARKER}: {skipped_names} -->")
 
     return "\n".join(sections)
 

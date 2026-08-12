@@ -11,8 +11,16 @@ from litellm import completion
 from .alerts import send_alerts_for_verdicts
 from .diff_parser import diff_summary, filter_hunks, parse_diff, reassemble_diff
 from .external_context import ExternalContext, fetch_external_context
-from .models import Finding, PersonaVerdict, ReviewResult, Severity
+from .models import (
+    SKIP_NO_FILES_IN_SCOPE,
+    SKIP_REVIEWER_UNAVAILABLE,
+    Finding,
+    PersonaVerdict,
+    ReviewResult,
+    Severity,
+)
 from .personas import Persona, ReviewProfile
+from .utils import not_reviewed_label
 
 MAX_RETRIES = 5
 INITIAL_BACKOFF = 5  # seconds
@@ -333,9 +341,35 @@ def _run_lead_review(
     verdicts: list[PersonaVerdict],
     model: str,
 ) -> tuple[str, str, list[Finding]]:
-    """Run the lead review after all specialists report."""
+    """Run the lead review after all specialists report.
+
+    Specialists that never ran are reported to the lead as not reviewed, not
+    as APPROVE. The lead is a reader like any other, and the defect in
+    F2iLLC/vigil#66 — a verdict table implying verdicts were reached — misled
+    it exactly the way it misled the humans and bots reading the posted
+    review: a synthesized APPROVE reads as "this domain was checked and is
+    clean" when nothing was checked at all. This changes only what the lead
+    is told, never how its answer is used.
+    """
     verdicts_text = ""
     for v in verdicts:
+        if not v.reviewed:
+            observations_str = "\n".join(
+                f"  - [{f.severity.value}] {f.file}:{f.line or '?'} -- {f.message}"
+                for f in v.observations
+            )
+            observations_block = (
+                "Observations:\n" + observations_str if observations_str else "No observations."
+            )
+            verdicts_text += f"""
+### {v.persona} [{v.session_id}]: {not_reviewed_label(v.skip_reason)}
+This specialist did NOT run: no model was called, so it reached no verdict and
+performed no checks. Treat its domain as UNEXAMINED, not as clean or approved,
+and do not count it as agreement with any other specialist.
+{observations_block}
+"""
+            continue
+
         checks_str = ", ".join(f"{k}: {val}" for k, val in v.checks.items())
         findings_str = ""
         if v.findings:
@@ -468,7 +502,14 @@ def review_diff(
         )
 
         if not specialist_diff.strip():
-            # No relevant files for this specialist — auto-approve
+            # No relevant files for this specialist — auto-approve.
+            #
+            # The decision stays APPROVE: nothing in this specialist's domain
+            # changed, so it must not block the merge. But no model was asked
+            # anything here, and reporting this as a plain APPROVE made it
+            # indistinguishable from a specialist that read the diff and found
+            # it clean (F2iLLC/vigil#66). reviewed=False is what every
+            # rendering surface keys off to say so out loud.
             verdicts.append(
                 PersonaVerdict(
                     persona=persona.name,
@@ -477,6 +518,8 @@ def review_diff(
                     checks={},
                     findings=[],
                     observations=[],
+                    reviewed=False,
+                    skip_reason=SKIP_NO_FILES_IN_SCOPE,
                 )
             )
             if on_specialist_done:
@@ -499,6 +542,11 @@ def review_diff(
             if _is_transient_llm_error(e):
                 # Transient infra error (503/timeout) — specialist was unavailable, not a code issue.
                 # Emit a non-blocking observation so the lead reviewer is informed but not forced to block.
+                #
+                # The observation says what happened, but the verdict itself
+                # still rendered as a bare APPROVE row (F2iLLC/vigil#66), and a
+                # reader scanning the verdict table never reaches the
+                # observation. reviewed=False puts the truth on the row itself.
                 verdicts.append(
                     PersonaVerdict(
                         persona=persona.name,
@@ -506,6 +554,8 @@ def review_diff(
                         decision="APPROVE",
                         checks={},
                         findings=[],
+                        reviewed=False,
+                        skip_reason=SKIP_REVIEWER_UNAVAILABLE,
                         observations=[
                             Finding(
                                 file="N/A",
