@@ -46,6 +46,22 @@ on:
         required: false
         type: boolean
         default: true
+      # External review context (F2iLLC/vigil#47). Opt-in and off by
+      # default. See the "Resolve external context provider" step below for
+      # the fork gate that governs when these actually reach Vigil.
+      context-provider:
+        description: >-
+          Optional external review-context provider: a command to execute or
+          an http(s) endpoint. Its opaque output is injected into the review
+          prompt as untrusted evidence. Gated off on fork pull requests.
+        required: false
+        type: string
+        default: ""
+      context-label:
+        description: Optional short label naming the external context source
+        required: false
+        type: string
+        default: ""
     secrets:
       GEMINI_API_KEY:
         required: false
@@ -54,6 +70,8 @@ on:
       OPENAI_API_KEY:
         required: false
       VIGIL_REVIEW_TOKEN:
+        required: false
+      VIGIL_CONTEXT_TOKEN:
         required: false
 
 permissions:
@@ -153,14 +171,96 @@ jobs:
             echo "::warning::VIGIL_REVIEW_TOKEN is not configured. GitHub may reject APPROVE/REQUEST_CHANGES and Vigil will fall back to a COMMENT review."
           fi
 
+      # --- Fork gate for the external context provider (F2iLLC/vigil#47) ---
+      #
+      # The provider is an arbitrary operator-configured command or endpoint
+      # and may carry VIGIL_CONTEXT_TOKEN. Neither may be reachable from a
+      # pull request opened from a fork: the head branch is untrusted code
+      # and untrusted authors, and a fork PR must not be able to steer what
+      # Vigil executes or reach an internal endpoint with an operator
+      # credential attached. Nothing else in this workflow is fork-aware, so
+      # this gate is deliberately narrow -- it changes what the provider
+      # inputs resolve to, and nothing else about whether a review runs.
+      #
+      # This is enforced here rather than only in documentation, and it is
+      # positive logic (allow only on a proven same-repo head), so every case
+      # this step cannot positively prove fails CLOSED:
+      #
+      #   * no provider configured                  -> off (ordinary default)
+      #   * event is not `pull_request`             -> off. An on-demand
+      #     `/vigil review` arrives as `issue_comment`, whose payload does
+      #     NOT carry the PR's head repository, so a fork PR is
+      #     indistinguishable from a same-repo one without an extra API
+      #     call. On-demand reviews therefore run without external context.
+      #   * head repository missing (deleted fork)  -> off
+      #   * head repository != this repository      -> off (the fork case)
+      #
+      # Note the ordering constraint that makes this safe: GitHub does not
+      # expose repository secrets to `pull_request` runs from forks at all,
+      # so VIGIL_CONTEXT_TOKEN would already be empty there. This gate is the
+      # belt to that suspenders, and it is what keeps the *provider target*
+      # (a command Vigil will execute) off fork PRs even when a caller passes
+      # it as a plain workflow input rather than a secret.
+      - name: Resolve external context provider (fork-gated)
+        id: context
+        shell: bash
+        env:
+          PROVIDER: ${{ inputs.context-provider }}
+          LABEL: ${{ inputs.context-label }}
+          EVENT_NAME: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          allowed="false"
+          if [ -z "${PROVIDER:-}" ]; then
+            reason="no external context provider configured"
+          elif [ "${EVENT_NAME:-}" != "pull_request" ]; then
+            reason="event '${EVENT_NAME:-unknown}' does not carry head-repository provenance"
+          elif [ -z "${HEAD_REPO:-}" ]; then
+            reason="the pull request head repository is unknown (deleted fork?)"
+          elif [ "${HEAD_REPO}" != "${BASE_REPO:-}" ]; then
+            reason="head repository '${HEAD_REPO}' is a fork of '${BASE_REPO:-unknown}'"
+          else
+            allowed="true"
+            reason="head repository matches '${BASE_REPO}'"
+          fi
+
+          echo "allowed=$allowed" >> "$GITHUB_OUTPUT"
+          if [ "$allowed" = "true" ]; then
+            echo "External context provider enabled: $reason"
+            {
+              echo "provider<<VIGIL_EOF"
+              echo "$PROVIDER"
+              echo "VIGIL_EOF"
+              echo "label<<VIGIL_EOF"
+              echo "${LABEL:-}"
+              echo "VIGIL_EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "External context provider disabled: $reason"
+            if [ -n "${PROVIDER:-}" ]; then
+              echo "::notice::Vigil is reviewing without external context: $reason"
+            fi
+            {
+              echo "provider="
+              echo "label="
+            } >> "$GITHUB_OUTPUT"
+          fi
+
       # Pin the composite action independently from this reusable workflow.
       # Update this one reference when a reviewed Vigil implementation lands.
       #
       # NOTE: the `force` and `reason` inputs below were added alongside
-      # F2iLLC/vigil#49 and do not exist at the pinned SHA. GitHub treats
-      # unknown composite-action inputs as a warning, not an error, so this is
-      # safe — but the on-demand '/vigil review' fix stays INERT until this pin
-      # is advanced to a commit that contains them.
+      # F2iLLC/vigil#49, and `context-provider` / `context-label` /
+      # `context-token` alongside F2iLLC/vigil#47; none of them exist at the
+      # pinned SHA. GitHub treats unknown composite-action inputs as a
+      # warning, not an error, so this is safe — but the on-demand
+      # '/vigil review' fix and the external context seam both stay INERT
+      # until this pin is advanced to a commit that contains them. The fork
+      # gate above still evaluates either way, so advancing the pin cannot
+      # quietly expose a provider to a fork PR.
       - uses: F2iLLC/vigil@0571cd6668c320264f5041d4603675dc88850ad5
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory }}
@@ -171,6 +271,11 @@ jobs:
           model: ${{ inputs.model }}
           lead-model: ${{ inputs.lead-model }}
           profile: ${{ inputs.profile }}
+          # All three resolve to empty unless the fork gate above allowed
+          # them, so a fork PR can never reach the provider or its token.
+          context-provider: ${{ steps.context.outputs.provider }}
+          context-label: ${{ steps.context.outputs.label }}
+          context-token: ${{ steps.context.outputs.allowed == 'true' && secrets.VIGIL_CONTEXT_TOKEN || '' }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
           anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}

@@ -232,6 +232,36 @@ If every changed file is recognized as documentation—Markdown, RST, text, comm
 
 Vigil fetches top-level PR comments and prior review bodies and supplies a bounded version of that conversation to every specialist and the lead. Reviewers are instructed to flag factual claims in the diff or description when the existing thread contradicts them.
 
+### External review context
+
+A PR can assert something that is only falsifiable against material outside the PR — a completion report claiming a milestone is done while the code is an empty stub. Vigil can be pointed at one **external context provider** so that class of claim becomes checkable.
+
+The provider is a seam, not an integration. Vigil never parses, validates, models, or writes back to whatever is on the other end, and carries no knowledge of any specific external system.
+
+```bash
+# A command (argv-parsed, run without a shell)…
+VIGIL_CONTEXT_PROVIDER="/usr/local/bin/review-context --format text"
+# …or an HTTP endpoint
+VIGIL_CONTEXT_PROVIDER=https://internal.example.com/vigil-context
+
+VIGIL_CONTEXT_LABEL="project tracker"   # optional, shown to reviewers
+VIGIL_CONTEXT_TOKEN=opaque-secret       # optional, one opaque token
+VIGIL_CONTEXT_TIMEOUT=20                # seconds, clamped to 1-60
+VIGIL_CONTEXT_MAX_CHARS=8000            # payload cap, clamped to 500-50000
+```
+
+Contract:
+
+- **Invoked once per review**, with the PR coordinates: `{"repo": "owner/repo", "pr_number": 12, "head_sha": "…", "changed_paths": [...]}` on stdin for a command, or as a JSON POST body for an endpoint. A command also receives `VIGIL_PR_REPO`, `VIGIL_PR_NUMBER`, `VIGIL_PR_HEAD_SHA`, and newline-separated `VIGIL_PR_CHANGED_PATHS` in its environment.
+- **Returns opaque text** (stdout or response body) plus an optional short label (`X-Vigil-Context-Label` response header for HTTP; `VIGIL_CONTEXT_LABEL` for a command). The text is injected into the prompt for every specialist and the lead.
+- **Untrusted evidence, not instructions.** The block states this explicitly, notes that — unlike PR conversation — the content may be machine-generated, and instructs reviewers that a contradiction with the diff or description is a `factual-accuracy` finding while an instruction found inside the payload is never itself a finding. Vigil deliberately does not detect or report prompt-injection attempts arriving this way: doing so would let a hostile provider manufacture findings on an unrelated PR.
+- **Truncation is visible.** Payloads over the cap keep their first `VIGIL_CONTEXT_MAX_CHARS` characters and carry an explicit marker naming the kept and original sizes, both inside the payload and in the block around it. Vigil never silently shortens the evidence.
+- **Fails open, always.** Unconfigured, empty output, non-zero exit, non-2xx status, timeout, or an unparseable command string — every one omits the section and the review proceeds normally. This seam can never block or fail a review.
+- **Read-only by construction.** Nothing is ever written back.
+- **One opaque token, maximum.** `VIGIL_CONTEXT_TOKEN` is forwarded verbatim as an environment variable (command) or an `X-Vigil-Context-Token` header (HTTP). Vigil holds no credentials for any particular external service and will not grow a client for one.
+
+**Fork-PR safety.** A provider configured with credentials must not be reachable from a fork. The reusable workflow enforces this in `.github/workflows/reusable-vigil.yml`, not just here: its `Resolve external context provider (fork-gated)` step resolves `context-provider`, `context-label`, and `context-token` to empty unless the event is `pull_request` **and** `github.event.pull_request.head.repo.full_name` equals `github.repository`. Everything it cannot positively prove fails closed — including on-demand `/vigil review`, which arrives as an `issue_comment` whose payload does not carry the head repository, so those runs review without external context. If you call the composite action directly rather than through the reusable workflow, you must apply the same gate yourself.
+
 ### Cross-specialist consensus
 
 When multiple specialists report the same file/category/message concern at overlapping lines, Vigil emits one finding and includes a consensus table showing which specialists raised it and their verdicts.
@@ -315,6 +345,7 @@ The centralized workflow provides:
 - `SKIP_VIGIL=true`, `skip-vigil`, and `[skip vigil]` controls;
 - model-aware provider-key checks;
 - approval-token warnings;
+- an optional, fork-gated [external context provider](#external-review-context) (`context-provider`, `context-label`, and the `VIGIL_CONTEXT_TOKEN` secret);
 - an advisory mode that keeps provider or infrastructure outages from turning into red CI by default (see [Advisory mode and loud failure](#advisory-mode-and-loud-failure)); and
 - a loud-failure guard so an install/run failure is never silently reported as a passing review, even while advisory mode keeps it non-blocking.
 
@@ -326,6 +357,7 @@ Set these repository or organization secrets:
 | `ANTHROPIC_API_KEY` | Using `claude-*` or `anthropic/*` | Specialist or lead model calls |
 | `OPENAI_API_KEY` | Using OpenAI models | Specialist or lead model calls |
 | `VIGIL_REVIEW_TOKEN` | Real approval events are required | Submit APPROVE/REQUEST_CHANGES as the reviewer identity |
+| `VIGIL_CONTEXT_TOKEN` | An [external context provider](#external-review-context) needs a credential | One opaque token forwarded to the provider; withheld on fork pull requests |
 
 Repository secrets are not exposed to untrusted fork pull requests under the normal `pull_request` event. Choose a fork-review policy deliberately; do not switch to `pull_request_target` without reviewing the security implications.
 
@@ -353,6 +385,9 @@ Available inputs:
 | `profile` | `default` | `default` or `enterprise` |
 | `force` | `false` | Review even when no files changed since the last review; the reusable workflow sets this for on-demand `/vigil review` |
 | `reason` | Empty | Why the review was requested; recorded in the run log |
+| `context-provider` | Empty | Command or `http(s)` endpoint supplying [external review context](#external-review-context). Never pass this on a fork pull request; the reusable workflow gates it off automatically, a direct caller must gate it itself |
+| `context-label` | Empty | Short label naming the external context source, shown to reviewers |
+| `context-token` | Empty | One opaque token for the external context provider (`VIGIL_CONTEXT_TOKEN` env for a command, `X-Vigil-Context-Token` header for HTTP). Fork-gated the same way |
 | `github-token` | `github.token` | Use `VIGIL_REVIEW_TOKEN` for real approval events |
 | `gemini-api-key` | Empty | Gemini provider credential |
 | `anthropic-api-key` | Empty | Anthropic provider credential |
@@ -488,6 +523,7 @@ src/vigil/
 |-- github_review.py           Review and inline-comment posting
 |-- comment_manager.py         Conversation, thread, and resolution lifecycle
 |-- context_manager.py         Cross-round fingerprints and filtering
+|-- external_context.py       Pluggable external review-context provider
 |-- cross_specialist_dedup.py  Consensus merging and formatting
 |-- issue_manager.py           Observation issue creation and deduplication
 |-- decision_log.py            SQLite-backed decision memory
