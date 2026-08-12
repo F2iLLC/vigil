@@ -14,6 +14,7 @@ from vigil.comment_manager import (
     is_duplicate_finding,
     resolve_addressed_threads,
     resolve_threads_batch,
+    resolve_vigil_threads_on_approval,
     VIGIL_SESSION_PATTERN,
 )
 
@@ -348,6 +349,122 @@ class TestResolveAddressedThreads:
         count = resolve_addressed_threads("F2iLLC", "demo", 1, "token", {"src/other.py": {10}})
 
         assert count == 0
+
+
+# ---------- resolve_vigil_threads_on_approval (issue #61) ----------
+
+def _thread(tid: str, body: str, *, path: str = "src/app.py",
+            line: int = 10, resolved: bool = False) -> dict:
+    """A review thread in the shape fetch_review_threads returns."""
+    return {
+        "id": tid,
+        "isResolved": resolved,
+        "path": path,
+        "line": line,
+        "body": body,
+        "comments": [{"body": body, "path": path, "line": line,
+                      "author": {"login": "vigil"}}],
+    }
+
+
+class TestResolveVigilThreadsOnApproval:
+    """Decision-driven resolution: the diff is not consulted at all.
+
+    The scope under test is every open Vigil thread on the PR, not the current
+    session's. session_id is per-specialist-run (models.py), so the stranded
+    threads this clears necessarily carry other session IDs.
+    """
+
+    def _wire(self, monkeypatch, threads: list[dict]) -> list[str]:
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads", lambda *args: threads,
+        )
+        resolved_ids: list[str] = []
+        monkeypatch.setattr(
+            "vigil.comment_manager.resolve_threads_batch",
+            lambda ids, token: resolved_ids.extend(ids) or ids,
+        )
+        return resolved_ids
+
+    def test_resolves_a_thread_from_an_earlier_session(self, monkeypatch):
+        """The reported shape: the open thread is not from this run."""
+        resolved_ids = self._wire(monkeypatch, [
+            _thread("thread-1", "Finding `VGL-abc123`", path="foo.py"),
+        ])
+
+        count = resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token")
+
+        assert count == 1
+        assert resolved_ids == ["thread-1"]
+
+    def test_resolves_threads_across_several_sessions(self, monkeypatch):
+        resolved_ids = self._wire(monkeypatch, [
+            _thread("thread-1", "Finding `VGL-abc123`", path="foo.py"),
+            _thread("thread-2", "Finding `VGL-def456`", path="bar.py"),
+        ])
+
+        count = resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token")
+
+        assert count == 2
+        assert resolved_ids == ["thread-1", "thread-2"]
+
+    def test_never_resolves_a_human_thread(self, monkeypatch):
+        """The VGL marker is the only thing separating ours from theirs."""
+        resolved_ids = self._wire(monkeypatch, [
+            _thread("human-1", "This naming is confusing to me.", path="foo.py"),
+        ])
+
+        count = resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token")
+
+        assert count == 0
+        assert resolved_ids == []
+
+    def test_resolves_ours_and_leaves_theirs_alone_in_the_same_pr(self, monkeypatch):
+        resolved_ids = self._wire(monkeypatch, [
+            _thread("human-1", "Please rename this.", path="foo.py"),
+            _thread("thread-1", "Finding `VGL-abc123`", path="foo.py"),
+        ])
+
+        count = resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token")
+
+        assert count == 1
+        assert resolved_ids == ["thread-1"]
+
+    def test_skips_already_resolved_threads(self, monkeypatch):
+        resolved_ids = self._wire(monkeypatch, [
+            _thread("thread-1", "Finding `VGL-abc123`", resolved=True),
+        ])
+
+        assert resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token") == 0
+        assert resolved_ids == []
+
+    def test_no_threads_makes_no_mutation_call(self, monkeypatch):
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads", lambda *args: [],
+        )
+
+        def fail(*args, **kwargs):  # pragma: no cover - must not be reached
+            raise AssertionError("resolve_threads_batch must not be called")
+
+        monkeypatch.setattr("vigil.comment_manager.resolve_threads_batch", fail)
+
+        assert resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token") == 0
+
+    def test_counts_only_what_github_confirmed_resolved(self, monkeypatch):
+        """resolve_threads_batch drops IDs GitHub did not confirm; so does the count."""
+        monkeypatch.setattr(
+            "vigil.comment_manager.fetch_review_threads",
+            lambda *args: [
+                _thread("thread-1", "Finding `VGL-abc123`"),
+                _thread("thread-2", "Finding `VGL-def456`"),
+            ],
+        )
+        monkeypatch.setattr(
+            "vigil.comment_manager.resolve_threads_batch",
+            lambda ids, token: ids[:1],
+        )
+
+        assert resolve_vigil_threads_on_approval("F2iLLC", "demo", 1, "token") == 1
 
 
 # ---------- _is_resolution_reply ----------

@@ -21,6 +21,7 @@ from .comment_manager import (
     get_vigil_review_state,
     resolve_addressed_threads,
     resolve_dismissed_threads,
+    resolve_vigil_threads_on_approval,
 )
 from .decision_log import clear_decisions, get_decisions, remove_decision
 from .diff_parser import commentable_lines, parse_diff
@@ -386,7 +387,8 @@ def review(
         except Exception as e:
             console.print(f"[red]Error posting review:[/red] {e}")
 
-        # --- Withdraw Vigil's own stale blocks (issue #48) ---
+        # --- Clean up Vigil's own leftovers: stale blocks (issue #48) and
+        # --- open review threads (issue #61) ---
         # Only ever on the way UP: an APPROVE that GitHub actually accepted AS
         # an approval. Three guards, all of which must hold, and all phrased
         # positively so that missing or unexpected data fails closed:
@@ -422,11 +424,41 @@ def review(
                     console.print(
                         f"[dim yellow]Could not dismiss stale Vigil block(s): {e}[/dim yellow]"
                     )
+
+                # --- Resolve Vigil's own open threads (issue #61) ---
+                # Same three guards, same reasoning, deliberately inside the
+                # same accepted-APPROVE branch: an APPROVE that degraded to a
+                # COMMENT has approved nothing, and resolving threads there
+                # would clear the visible findings while the PR stays blocked —
+                # strictly worse than the bug this fixes.
+                #
+                # Scope is every open Vigil thread on the PR, not this run's.
+                # session_id is per-SPECIALIST-RUN, not per-review-round
+                # (models.py: PersonaVerdict.session_id), so the stranded
+                # threads this exists to clear necessarily carry OTHER session
+                # IDs; a current-session-only filter would resolve nothing in
+                # the exact reported scenario. Human threads are excluded by
+                # the VGL marker gate inside the resolver.
+                try:
+                    thread_count = resolve_vigil_threads_on_approval(
+                        owner, repo, pr_number, token,
+                    )
+                    if thread_count:
+                        console.print(
+                            f"[dim]Resolved {thread_count} open Vigil thread(s) "
+                            f"cleared by the approval at {head_sha[:7]}[/dim]"
+                        )
+                # Belt and braces again: this cleanup must never be able to
+                # fail a review that has already posted.
+                except Exception as e:
+                    console.print(
+                        f"[dim yellow]Could not resolve open Vigil thread(s): {e}[/dim yellow]"
+                    )
             else:
                 console.print(
                     "[dim yellow]Approval did not post as an APPROVE event "
                     f"({post_outcome.get('submitted_event', 'unknown')}) — "
-                    "leaving prior Vigil blocks in place[/dim yellow]"
+                    "leaving prior Vigil blocks and threads in place[/dim yellow]"
                 )
 
         # Swap rocket for final reaction
