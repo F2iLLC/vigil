@@ -26,6 +26,12 @@ class Finding(BaseModel):
 # stay stable even if the words Vigil renders around them change.
 SKIP_NO_FILES_IN_SCOPE = "no_files_in_scope"
 SKIP_REVIEWER_UNAVAILABLE = "reviewer_unavailable"
+# A specialist that can only review against material from outside the PR (a
+# governing spec, plan, or requirement set) and did not receive any. It must
+# skip rather than review: with no spec to check against, the only honest
+# output is "unexamined". Answering anyway would mean judging conformance
+# against the PR's own description, which is what having no spec looks like.
+SKIP_NO_EXTERNAL_CONTEXT = "no_external_context"
 
 
 class PersonaVerdict(BaseModel):

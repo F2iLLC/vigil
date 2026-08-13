@@ -10,7 +10,12 @@ Centralizes common functions to avoid duplication and circular imports:
 import hashlib
 import re
 
-from .models import SKIP_NO_FILES_IN_SCOPE, SKIP_REVIEWER_UNAVAILABLE, Severity
+from .models import (
+    SKIP_NO_EXTERNAL_CONTEXT,
+    SKIP_NO_FILES_IN_SCOPE,
+    SKIP_REVIEWER_UNAVAILABLE,
+    Severity,
+)
 
 # ---------- GitHub API ----------
 
@@ -50,6 +55,7 @@ NOT_REVIEWED_LABEL = "NOT REVIEWED"
 NOT_REVIEWED_REASON_TEXT: dict[str, str] = {
     SKIP_NO_FILES_IN_SCOPE: "no files in scope",
     SKIP_REVIEWER_UNAVAILABLE: "reviewer unavailable",
+    SKIP_NO_EXTERNAL_CONTEXT: "no governing spec supplied",
 }
 
 
