@@ -12,6 +12,7 @@ from .alerts import send_alerts_for_verdicts
 from .diff_parser import diff_summary, filter_hunks, parse_diff, reassemble_diff
 from .external_context import ExternalContext, fetch_external_context
 from .models import (
+    SKIP_NO_EXTERNAL_CONTEXT,
     SKIP_NO_FILES_IN_SCOPE,
     SKIP_REVIEWER_UNAVAILABLE,
     Finding,
@@ -500,6 +501,33 @@ def review_diff(
         pr_block = _build_pr_context_block(
             specialist_diff, pr_context, full_summary, external_context,
         )
+
+        if persona.requires_external_context and not (
+            external_context is not None and external_context.text.strip()
+        ):
+            # This specialist reviews the diff against material from outside
+            # the PR and was given none. Running it anyway would leave it with
+            # only the PR's own description to check against — the PR grading
+            # its own homework, which is the exact failure it exists to catch.
+            #
+            # Same contract as the no-files skip: APPROVE so a review with no
+            # provider configured is not blocked fleet-wide, reviewed=False so
+            # no surface can report it as a conformance pass.
+            verdicts.append(
+                PersonaVerdict(
+                    persona=persona.name,
+                    session_id=_gen_session_id(),
+                    decision="APPROVE",
+                    checks={},
+                    findings=[],
+                    observations=[],
+                    reviewed=False,
+                    skip_reason=SKIP_NO_EXTERNAL_CONTEXT,
+                )
+            )
+            if on_specialist_done:
+                on_specialist_done(verdicts[-1])
+            continue
 
         if not specialist_diff.strip():
             # No relevant files for this specialist — auto-approve.

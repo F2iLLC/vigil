@@ -29,7 +29,7 @@ Each specialist receives only the files relevant to its domain. Security skips d
 ## Features
 
 - **Model-agnostic review** through [LiteLLM](https://github.com/BerriAI/litellm).
-- **Six default specialists plus a lead**, with a seven-specialist enterprise profile for regulated systems.
+- **Seven default specialists plus a lead**, with an eight-specialist enterprise profile for regulated systems.
 - **Inline findings on blocking verdicts only**, relocated to a valid changed line when the model cites an un-commentable location. An approving review reports its findings in the review body, so it never opens a thread it does not intend to block on.
 - **Actionable observation gate** that rejects model-generated praise or notes without a concrete follow-up action.
 - **Automatic issue tracking** for non-blocking observations, with severity-matched priority labels and open-issue deduplication.
@@ -542,7 +542,7 @@ Both delivery paths are best-effort and additive. Leave their configuration unse
 
 ### `enterprise`
 
-The enterprise profile is a separate seven-specialist team, not the default team plus two appended reviewers:
+The enterprise profile is a separate eight-specialist team, not the default team plus appended reviewers:
 
 | Specialist | Focus | Blocking |
 | --- | --- | --- |
