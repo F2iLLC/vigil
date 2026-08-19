@@ -66,7 +66,7 @@ python -m pip install -e ".[webhook]"
 For a pinned CLI installation without cloning:
 
 ```bash
-python -m pip install "git+https://github.com/F2iLLC/vigil.git@0571cd6668c320264f5041d4603675dc88850ad5"
+python -m pip install "git+https://github.com/F2iLLC/vigil.git@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e"
 ```
 
 ## Quick start
@@ -381,7 +381,7 @@ Repository secrets are not exposed to untrusted fork pull requests under the nor
 If the centralized lifecycle is unnecessary, call the composite action directly:
 
 ```yaml
-- uses: F2iLLC/vigil@0571cd6668c320264f5041d4603675dc88850ad5
+- uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
   with:
     model: gemini/gemini-3.1-flash-lite
     profile: default
