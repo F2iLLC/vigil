@@ -261,7 +261,7 @@ jobs:
       # until this pin is advanced to a commit that contains them. The fork
       # gate above still evaluates either way, so advancing the pin cannot
       # quietly expose a provider to a fork PR.
-      - uses: F2iLLC/vigil@0571cd6668c320264f5041d4603675dc88850ad5
+      - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory }}
         with:
@@ -343,7 +343,7 @@ jobs:
         run: |
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
-      - uses: F2iLLC/vigil@0571cd6668c320264f5041d4603675dc88850ad5
+      - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
         continue-on-error: ${{ inputs.advisory }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
@@ -360,7 +360,7 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
-      - uses: F2iLLC/vigil@0571cd6668c320264f5041d4603675dc88850ad5
+      - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
         continue-on-error: ${{ inputs.advisory }}
         with:
           command: resolve-addressed
