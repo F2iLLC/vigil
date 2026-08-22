@@ -537,7 +537,33 @@ def post_review(
         try:
             _, suppressed_findings = validate_findings_against_head(
                 findings_at_head, owner, repo, result.commit_sha, token,
+                diff_files=list(valid_lines),
             )
+
+            # The rebuild lives inside the `try` on purpose: it is the step
+            # that actually removes findings from the review, so an exception
+            # here has to fail open the same way the validation call does.
+            # Outside it, a raise mid-rebuild would leave findings deleted
+            # from the verdicts with `suppressed_findings` never reported —
+            # i.e. silently dropped, which is the #74 failure mode itself.
+            if suppressed_findings:
+                stale_ids = {id(item.finding) for item in suppressed_findings}
+                # Every list is computed before anything is assigned, so a
+                # partially-applied rebuild is not a reachable state.
+                kept_per_verdict = [
+                    (v, [f for f in v.findings if id(f) not in stale_ids])
+                    for v in result.specialist_verdicts
+                ]
+                kept_lead = [
+                    f for f in result.lead_findings if id(f) not in stale_ids
+                ]
+                log.info(
+                    "Withheld %d finding(s) not supported by %s",
+                    len(stale_ids), result.commit_sha[:7],
+                )
+                for verdict, kept in kept_per_verdict:
+                    verdict.findings = kept
+                result.lead_findings = kept_lead
         except Exception as e:  # noqa: BLE001 — validation never fails a review
             log.warning(
                 "Head-content validation failed (%s: %s) — posting every "
@@ -545,18 +571,6 @@ def post_review(
                 type(e).__name__, e,
             )
             suppressed_findings = []
-
-        if suppressed_findings:
-            stale_ids = {id(item.finding) for item in suppressed_findings}
-            log.info(
-                "Withheld %d finding(s) not supported by %s",
-                len(stale_ids), result.commit_sha[:7],
-            )
-            for v in result.specialist_verdicts:
-                v.findings = [f for f in v.findings if id(f) not in stale_ids]
-            result.lead_findings = [
-                f for f in result.lead_findings if id(f) not in stale_ids
-            ]
 
     # --- Step 1: Route findings — inline only on a blocking verdict (#52) ---
     blocking_verdict = is_blocking_decision(result.decision)

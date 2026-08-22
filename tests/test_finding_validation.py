@@ -109,12 +109,22 @@ def readable(answer: bool = True):
     return lambda owner, repo, sha, token: answer
 
 
+# The default file set handed to the guard: a diff that touches neither of the
+# fixture paths. Absence-suppression needs a diff to corroborate a 404
+# against (a mis-cited path 404s exactly like a hallucinated one), and this
+# set is the "no counterpart anywhere in the diff" case — i.e. the only shape
+# that is evidence. Tests about mis-cited paths pass their own set.
+UNRELATED_DIFF_FILES = ("docs/CHANGELOG.md",)
+
+
 def validate(findings, *, files=None, calls=None, head_sha=SHA,
-             fetch=None, commit_readable=None):
+             fetch=None, commit_readable=None,
+             diff_files=UNRELATED_DIFF_FILES):
     return validate_findings_against_head(
         findings, "F2iLLC", "demo", head_sha, "token",
         fetch_content=fetch or fetcher(files or {}, calls),
         commit_readable=commit_readable or readable(True),
+        diff_files=diff_files,
     )
 
 
@@ -166,6 +176,106 @@ class TestFileAbsentAtHead:
 
         assert len(suppressed) == 3
         assert probes == [SHA]
+
+
+class TestAMisCitedPathIsNotAnAbsentFile:
+    """A 404 for the literal cited path is two different facts wearing one hat.
+
+    Nothing upstream normalizes `finding.file`, and models mis-cite paths
+    constantly — that is precisely why `diff_parser.find_best_file_for_finding`
+    exists. A missing directory prefix or a leading slash (which
+    `quote(path, safe='/')` turns into a `contents//src/...` URL) produces the
+    same 404 as a file that genuinely is not in the tree. Suppressing on the
+    first shape drops a live defect over a typo, and does it *before*
+    `_place_finding_inline` gets its chance to relocate the comment.
+    """
+
+    def test_a_wrong_prefix_path_that_matches_the_diff_is_kept(self):
+        """`auth.py` for `src/auth.py`: the classic dropped-prefix citation."""
+        f = sql_finding(file="auth.py")
+        supported, suppressed = validate(
+            [f], files={}, diff_files=[AUTH_PATH],
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_an_extra_prefix_path_that_matches_the_diff_is_kept(self):
+        """The mirror image: the model prepends the repository name."""
+        f = sql_finding(file="demo/" + AUTH_PATH)
+        supported, suppressed = validate(
+            [f], files={}, diff_files=[AUTH_PATH],
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_a_leading_slash_path_that_matches_the_diff_is_kept(self):
+        """`/src/auth.py` 404s because of URL construction, not absence."""
+        f = sql_finding(file="/" + AUTH_PATH)
+        supported, suppressed = validate(
+            [f], files={}, diff_files=[AUTH_PATH],
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_a_renamed_directory_still_matching_by_basename_is_kept(self):
+        f = sql_finding(file="lib/auth.py")
+        supported, suppressed = validate(
+            [f], files={}, diff_files=["src/pkg/auth.py"],
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_a_path_with_no_counterpart_in_the_diff_is_still_suppressed(self):
+        """The tightening must not become a blanket amnesty: a cited file that
+        matches nothing the PR touched, at a commit this token can read, is
+        still positive evidence."""
+        f = sql_finding(file="src/does_not_exist.py")
+        supported, suppressed = validate(
+            [f], files={}, diff_files=[AUTH_PATH, JSX_PATH],
+        )
+
+        assert supported == []
+        assert suppressed[0].reason == STALE_FILE_ABSENT
+
+    def test_no_diff_file_set_never_suppresses_on_absence(self):
+        """The parameter is optional, and its absence is not evidence.
+
+        Without a file set there is nothing to tell a mis-cited path from a
+        hallucinated one, so the conservative answer — and the only permitted
+        default — is to keep the finding.
+        """
+        f = sql_finding()
+        supported, suppressed = validate([f], files={}, diff_files=None)
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_an_empty_diff_file_set_never_suppresses_on_absence(self):
+        f = sql_finding()
+        supported, suppressed = validate([f], files={}, diff_files=[])
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_a_resolvable_path_does_not_even_probe_the_commit(self):
+        """Cheap corroboration first: no API call is worth making once the
+        answer is already 'keep'."""
+        probes: list[str] = []
+
+        def counting_probe(owner, repo, sha, token):
+            probes.append(sha)
+            return True
+
+        validate(
+            [sql_finding(file="auth.py")], files={},
+            diff_files=[AUTH_PATH], commit_readable=counting_probe,
+        )
+
+        assert probes == []
 
 
 # ---------- the defect is still there ----------
@@ -264,6 +374,199 @@ class TestFixAlreadyPresentAtHead:
         supported, suppressed = validate([f], files={JSX_PATH: JSX_FILE_AT_HEAD})
 
         assert supported == [f]
+
+    def test_the_74_import_still_clears_every_snippet_filter(self):
+        """The floor exists to reject bare calls and filenames, not this.
+
+        Pinned directly on `_remedy_snippets` as well as end-to-end, because
+        the whole PR is worthless if a tightening quietly raises the bar past
+        the one shape it was built to catch.
+        """
+        f = jsx_finding()
+        assert 'import type { JSX } from "react";' in finding_validation._remedy_snippets(f)
+
+    def test_the_74_import_is_still_caught_as_a_fenced_block(self):
+        f = jsx_finding(
+            suggestion=(
+                "Add the namespace import at the top of the file:\n\n"
+                '```tsx\nimport type { JSX } from "react";\n```'
+            ),
+        )
+        supported, suppressed = validate([f], files={JSX_PATH: JSX_FILE_AT_HEAD})
+
+        assert supported == []
+        assert suppressed[0].reason == STALE_FIX_ALREADY_PRESENT
+
+
+# ---------- the suggestion is not a remedy field ----------
+
+TIMEOUT_PATH = "src/fetch.py"
+TIMEOUT_FILE_AT_HEAD = '''import httpx
+
+# The pin belongs in requirements.txt, not here.
+def fetch(url, client):
+    client.request("GET", url)
+    return httpx.get(url)
+'''
+
+
+class TestSuggestionsThatQuoteTheOffendingCode:
+    """The inversion this guard is one bad suggestion away from.
+
+    `personas.py:21` types `suggestion` as a free-form `"string or null"`. It
+    is emphatically NOT "what the file should contain once the finding is
+    addressed" — models write "replace X with Y", or a before/after pair of
+    fenced blocks, or name the file to edit. Every one of those puts the
+    CURRENT code into the field, and the guard then finds it at head
+    *because the fix was never applied* and suppresses a live finding: a real
+    defect withheld from a merge gate five repositories depend on, labelled
+    stale.
+
+    Each case below is a shape a model actually emits, and each asserts the
+    finding is KEPT. They are separated so that a regression names the filter
+    that broke, not just "something suppresses too much".
+    """
+
+    def test_replace_x_with_y_does_not_suppress_on_the_x(self):
+        """The single-inline-span shape. Only the token floor stops this one:
+        `httpx.get(url)` is 14 characters and has parentheses, so length and
+        code-shape both wave it through."""
+        f = Finding(
+            file=TIMEOUT_PATH,
+            line=6,
+            severity=Severity.high,
+            category="Reliability",
+            message="The outbound call sets no deadline, so a hung upstream pins a worker.",
+            suggestion="Replace `httpx.get(url)` with `httpx.get(url, timeout=30)`",
+        )
+        supported, suppressed = validate(
+            [f], files={TIMEOUT_PATH: TIMEOUT_FILE_AT_HEAD},
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_a_before_and_after_pair_of_fences_uses_only_the_after(self):
+        """The two-fence shape. The token floor does NOT save this one —
+        `return httpx.get(url)` names four distinct tokens — so it isolates
+        the last-block rule."""
+        f = Finding(
+            file=TIMEOUT_PATH,
+            line=6,
+            severity=Severity.high,
+            category="Reliability",
+            message="The outbound call sets no deadline.",
+            suggestion=(
+                "Current:\n\n```python\nreturn httpx.get(url)\n```\n\n"
+                "Change to:\n\n```python\nreturn httpx.get(url, timeout=30)\n```"
+            ),
+        )
+        supported, suppressed = validate(
+            [f], files={TIMEOUT_PATH: TIMEOUT_FILE_AT_HEAD},
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_only_the_last_fenced_block_is_read_as_the_remedy(self):
+        f = Finding(
+            file=TIMEOUT_PATH, line=6, severity=Severity.high,
+            category="Reliability", message="No deadline.",
+            suggestion=(
+                "Current:\n\n```python\nreturn httpx.get(url)\n```\n\n"
+                "Change to:\n\n```python\nreturn httpx.get(url, timeout=30)\n```"
+            ),
+        )
+
+        assert finding_validation._remedy_snippets(f) == [
+            "return httpx.get(url, timeout=30)"
+        ]
+
+    def test_a_bare_filename_is_not_a_remedy_snippet(self):
+        """`requirements.txt` clears the code-shape test on its lone dot and
+        the length floor on its sixteen characters, and any file that mentions
+        it — a comment, an import, a docstring — would suppress the finding."""
+        f = Finding(
+            file=TIMEOUT_PATH,
+            line=1,
+            severity=Severity.medium,
+            category="Supply Chain",
+            message="The httpx dependency is unpinned.",
+            suggestion="Add the pin to `requirements.txt`",
+        )
+        supported, suppressed = validate(
+            [f], files={TIMEOUT_PATH: TIMEOUT_FILE_AT_HEAD},
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_a_span_quoted_in_the_message_too_is_never_the_remedy(self):
+        """The message names the code complained about. A span that appears in
+        both fields is that code, whatever the suggestion's grammar implies —
+        and it is present at head exactly when the finding is live. Neither
+        the token floor nor the last-block rule catches this shape."""
+        f = Finding(
+            file=TIMEOUT_PATH,
+            line=5,
+            severity=Severity.high,
+            category="Reliability",
+            message='The call `client.request("GET", url)` never sets a deadline.',
+            suggestion=(
+                '`client.request("GET", url)` should become '
+                '`client.request("GET", url, timeout=30)`'
+            ),
+        )
+        supported, suppressed = validate(
+            [f], files={TIMEOUT_PATH: TIMEOUT_FILE_AT_HEAD},
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    def test_the_message_comparison_is_whitespace_insensitive(self):
+        """Both sides go through the same `_normalize`, so re-wrapping the
+        message cannot smuggle a complained-about span past the filter."""
+        f = Finding(
+            file=TIMEOUT_PATH,
+            line=5,
+            severity=Severity.high,
+            category="Reliability",
+            message='The call\n\n    `client.request("GET",\n     url)`\n\nsets no deadline.',
+            suggestion='Fix `client.request("GET", url)` to pass a timeout.',
+        )
+        supported, suppressed = validate(
+            [f], files={TIMEOUT_PATH: TIMEOUT_FILE_AT_HEAD},
+        )
+
+        assert supported == [f]
+        assert suppressed == []
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            "httpx.get(url)",
+            "requirements.txt",
+            "x = 1;",
+            "self.value = value",
+            "package.json",
+        ],
+        ids=["bare-call", "filename", "trivial", "two-names", "manifest"],
+    )
+    def test_snippets_with_too_little_named_structure_are_rejected(self, snippet):
+        assert not finding_validation._is_code_like(snippet)
+
+    @pytest.mark.parametrize(
+        "snippet",
+        [
+            'import type { JSX } from "react";',
+            "return httpx.get(url, timeout=30)",
+            'cursor.execute("SELECT * FROM t WHERE id = ?", (user_id,))',
+        ],
+        ids=["jsx-import", "timeout-call", "parameterized-query"],
+    )
+    def test_snippets_that_are_a_real_line_of_code_are_accepted(self, snippet):
+        assert finding_validation._is_code_like(snippet)
 
 
 # ---------- ambiguity keeps the finding ----------
@@ -562,6 +865,105 @@ class TestPostReviewAppliesTheGuard:
         payload = mock_post.call_args_list[0].kwargs["json"]
         assert len(payload["comments"]) == 1
         assert result.specialist_verdicts[0].findings != []
+
+    @patch("vigil.github_review.httpx.post")
+    def test_a_rebuild_that_raises_posts_every_finding(self, mock_post, monkeypatch):
+        """Fail open covers the mutation, not just the call that precedes it.
+
+        The rebuild is what actually removes findings from the review. With it
+        outside the guard's `try`, a raise there would delete findings from the
+        verdicts while `suppressed_findings` was never reported — findings
+        silently gone, which is #74's own failure mode.
+        """
+        class ExplodingRecord:
+            @property
+            def finding(self):
+                raise RuntimeError("rebuild exploded")
+
+        def half_broken(findings, *a, **k):
+            return list(findings), [ExplodingRecord()]
+
+        monkeypatch.setattr(
+            github_review, "validate_findings_against_head", half_broken,
+        )
+        mock_post.return_value = _ok()
+        result = _result("REQUEST_CHANGES", findings=[sql_finding()])
+
+        post_review("o", "r", 1, result, "tok", diff=DIFF)
+
+        payload = mock_post.call_args_list[0].kwargs["json"]
+        assert len(payload["comments"]) == 1
+        assert result.specialist_verdicts[0].findings != []
+        assert "Suppressed Findings" not in payload["body"]
+
+    @patch("vigil.github_review.httpx.post")
+    def test_the_guard_is_given_the_diffs_own_file_set(self, mock_post, monkeypatch):
+        """`post_review` already computed it; absence-suppression needs it."""
+        seen: list = []
+
+        def recording(findings, owner, repo, head_sha, token, *a, **k):
+            seen.append(k.get("diff_files"))
+            return list(findings), []
+
+        monkeypatch.setattr(
+            github_review, "validate_findings_against_head", recording,
+        )
+        mock_post.return_value = _ok()
+
+        post_review(
+            "o", "r", 1, _result("REQUEST_CHANGES", findings=[sql_finding()]),
+            "tok", diff=DIFF,
+        )
+
+        assert seen == [[AUTH_PATH]]
+
+    @patch("vigil.github_review.httpx.post")
+    def test_a_mis_cited_path_survives_and_is_relocated(self, mock_post, real_guard):
+        """End to end for FIX 2: the finding is kept, and the relocation Vigil
+        already had then places it on the file the diff really touches."""
+        real_guard({})
+        mock_post.return_value = _ok()
+        result = _result("REQUEST_CHANGES", findings=[sql_finding(file="auth.py")])
+
+        post_review("o", "r", 1, result, "tok", diff=DIFF)
+
+        payload = mock_post.call_args_list[0].kwargs["json"]
+        assert result.specialist_verdicts[0].findings != []
+        assert "Suppressed Findings" not in payload["body"]
+        assert payload["comments"][0]["path"] == AUTH_PATH
+
+    @patch("vigil.github_review.httpx.post")
+    def test_a_path_matching_nothing_in_the_diff_is_still_suppressed(
+        self, mock_post, real_guard,
+    ):
+        real_guard({})
+        mock_post.return_value = _ok()
+        result = _result(
+            "REQUEST_CHANGES", findings=[sql_finding(file="src/imaginary.py")],
+        )
+
+        post_review("o", "r", 1, result, "tok", diff=DIFF)
+
+        body = mock_post.call_args_list[0].kwargs["json"]["body"]
+        assert result.specialist_verdicts[0].findings == []
+        assert "Suppressed Findings (1 not supported" in body
+
+    @patch("vigil.github_review.httpx.post")
+    def test_no_diff_means_nothing_is_suppressed_for_absence(
+        self, mock_post, real_guard,
+    ):
+        """No diff, no file set, no corroboration — so no absence-suppression."""
+        real_guard({})
+        mock_post.return_value = _ok()
+        result = _result(
+            "REQUEST_CHANGES", findings=[sql_finding(file="src/imaginary.py")],
+        )
+
+        post_review("o", "r", 1, result, "tok", diff="")
+
+        body = mock_post.call_args_list[0].kwargs["json"]["body"]
+        assert result.specialist_verdicts[0].findings != []
+        assert "Suppressed Findings" not in body
 
     @patch("vigil.github_review.httpx.post")
     def test_no_commit_sha_means_no_validation(self, mock_post, monkeypatch):

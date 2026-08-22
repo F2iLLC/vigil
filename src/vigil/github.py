@@ -176,7 +176,12 @@ def get_file_content_at_commit(
         f"https://api.github.com/repos/{owner}/{repo}/contents/"
         f"{quote(path, safe='/')}"
     )
-    with httpx.Client() as client:
+    # Redirects are followed rather than raised on: httpx defaults to
+    # `follow_redirects=False`, so a 301 (renamed repository, canonicalized
+    # owner) reaches `raise_for_status` as an error and the head-content guard
+    # reads it as "unverified" — i.e. one org rename would silently switch the
+    # guard off for every finding in the review.
+    with httpx.Client(follow_redirects=True) as client:
         resp = client.get(url, headers=headers, params={"ref": ref}, timeout=30)
         if resp.status_code == 404:
             return None
@@ -198,7 +203,10 @@ def commit_is_readable(owner: str, repo: str, sha: str, token: str) -> bool:
         "Authorization": f"Bearer {token}",
     }
     url = f"https://api.github.com/repos/{owner}/{repo}/git/commits/{sha}"
-    with httpx.Client() as client:
+    # Follows redirects for the same reason as the contents fetch above: an
+    # unfollowed 301 here raises, and this probe raising means every
+    # absent-file result in the review is treated as unverified.
+    with httpx.Client(follow_redirects=True) as client:
         resp = client.get(url, headers=headers, timeout=30)
         if resp.status_code == 404:
             return False

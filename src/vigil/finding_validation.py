@@ -13,8 +13,20 @@ the worst possible combination because the SHA is what makes it look verified.
 This module is the guard. Its bias is asymmetric and deliberate:
 
   * A finding is suppressed ONLY on positive evidence of staleness.
-  * Anything ambiguous keeps the finding — an unresolvable line, a message
-    with no citable remedy, an unreadable blob, and *any* API failure at all.
+  * Anything ambiguous keeps the finding — an unresolvable line, a mis-cited
+    path, a message with no citable remedy, an unreadable blob, and *any* API
+    failure at all.
+
+Note what the evidence is *not*. ``suggestion`` is free-form text
+(``personas.py`` asks for a ``"string or null"``), not a machine-readable
+patch, so the code spans in it are a mix of the remedy and the code being
+complained about. Treating all of them as the remedy inverts the guard —
+the offending code is in the file precisely when the fix was *not* applied.
+``_remedy_snippets`` is where that mix is narrowed down, and every filter in
+it is chosen to fail toward keeping the finding. Likewise a 404 for a cited
+path is not by itself proof the file is gone: it is also what a mis-typed
+path looks like, which is why absence must corroborate against the diff's own
+file list before it counts.
 
 The two error directions are not comparable, so they are not weighed equally.
 A finding kept in error costs a reviewer one wrong comment, visible and
@@ -28,7 +40,9 @@ findings still posts as REQUEST_CHANGES. Suppression changes what a review
 
 import logging
 import re
+from collections.abc import Collection
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Callable
 
 from .github import commit_is_readable, get_file_content_at_commit
@@ -57,10 +71,37 @@ _REASON_TEXT: dict[str, str] = {
 # rejected before the search happens.
 _MIN_SNIPPET_CHARS = 12
 
+# ...but a character floor alone is far too weak, because the dangerous
+# snippets are short *and* punctuated. ``httpx.get(url)`` is 14 characters and
+# passes the code-shape test, yet it is the code being complained about, not a
+# remedy; ``requirements.txt`` clears the shape test on its lone ``.``. Both
+# are present at head precisely when the finding is live, so matching on them
+# suppresses exactly the findings that must survive.
+#
+# So a snippet must also carry enough *named* structure to be a line of code
+# rather than a reference to one: at least this many DISTINCT word tokens
+# (identifiers, keywords, numeric literals). Four is the smallest floor that
+# separates the two populations seen in real suggestions:
+#
+#   rejected  ``httpx.get(url)``            → httpx, get, url                (3)
+#   rejected  ``requirements.txt``          → requirements, txt              (2)
+#   rejected  ``x = 1;``                    → x, 1                           (2)
+#   accepted  ``import type { JSX } from "react";``
+#                                → import, type, JSX, from, react            (5)
+#
+# The #74 shape — the JSX import — is the case this guard exists for, so the
+# floor is set below it and no higher. Raising it would reopen #74; lowering
+# it re-admits the bare-call and bare-filename shapes above. Both floors
+# apply: a long snippet of two repeated names is no more specific than a
+# short one.
+_MIN_SNIPPET_TOKENS = 4
+
 _FENCED_CODE = re.compile(r"```[\w+.-]*\r?\n(.*?)```", re.DOTALL)
 _INLINE_CODE = re.compile(r"`([^`\n]+)`")
 _CODE_SHAPE = re.compile(r"[=(){}\[\];:<>.]")
+_WORD_TOKEN = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*|\d+")
 _WHITESPACE = re.compile(r"\s+")
+_PATH_SEPARATORS = re.compile(r"[\\/]+")
 
 # Sentinel for "this blob could not be read", kept distinct from ``None``,
 # which this module reads as the much stronger claim "GitHub says there is no
@@ -97,33 +138,74 @@ def _normalize(text: str) -> str:
     return _WHITESPACE.sub(" ", text).strip()
 
 
+def _distinct_word_tokens(snippet: str) -> int:
+    """How many distinct identifiers/keywords/literals a snippet names."""
+    return len(set(_WORD_TOKEN.findall(snippet)))
+
+
 def _is_code_like(snippet: str) -> bool:
-    """True when a snippet is specific enough to search source for."""
-    return len(snippet) >= _MIN_SNIPPET_CHARS and bool(_CODE_SHAPE.search(snippet))
+    """True when a snippet is specific enough to search source for.
+
+    Three independent floors, all of which must hold: long enough, punctuated
+    like code, and carrying at least ``_MIN_SNIPPET_TOKENS`` distinct named
+    tokens. See that constant for why a character count alone is not enough.
+    """
+    return (
+        len(snippet) >= _MIN_SNIPPET_CHARS
+        and bool(_CODE_SHAPE.search(snippet))
+        and _distinct_word_tokens(snippet) >= _MIN_SNIPPET_TOKENS
+    )
 
 
 def _remedy_snippets(finding: Finding) -> list[str]:
-    """The code this finding asks for, from the one field that means that.
+    """The code this finding asks for, best-effort, from ``suggestion``.
 
-    Only ``suggestion`` is read, and only the code spans inside it — fenced
-    blocks and backticked spans. That field is, by construction, what the file
-    should contain once the finding is addressed, so finding it *already*
-    there is direct evidence the finding describes content older than the
-    commit it cites.
+    ``suggestion`` is **not** a remedy field by construction — ``personas.py``
+    asks the model for a free-form ``"string or null"``, and models routinely
+    quote the current code beside the fix ("replace ``a`` with ``b``",
+    "Current: … / Change to: …"). Extracting every code span from it and
+    testing for presence at head therefore inverts on exactly those shapes:
+    the offending code is found in the file *because the fix was never
+    applied*, and a live finding is suppressed. Three filters narrow the raw
+    spans down to something that can only be a remedy:
 
-    The message is deliberately not mined the same way. A message cites the
-    code it is complaining *about* ("missing null check on ``user.email``"),
-    which is present at head precisely when the defect is real — mining it
-    would invert the test and suppress live findings.
+    1. **Fences: the last block only.** When a suggestion carries several
+       fenced blocks the convention — in the prompt's own examples and in
+       model output generally — is before-then-after, so only the final block
+       can be the desired state. Earlier blocks are the code complained about.
+    2. **Nothing that also appears in ``finding.message``.** A span quoted in
+       both is the defect being described, not the fix for it. The message is
+       already never mined directly, for the same reason; this closes the
+       route by which it gets mined indirectly.
+    3. **Enough code to be a line, not a reference to one** — see
+       ``_is_code_like`` and ``_MIN_SNIPPET_TOKENS``.
+
+    Every one of these can only *reduce* the snippet set, i.e. only ever keep
+    a finding that would otherwise have been suppressed. That is the safe
+    direction, and it is the only direction this function is allowed to move.
     """
     text = finding.suggestion or ""
     if not text.strip():
         return []
 
     fenced = _FENCED_CODE.findall(text)
+    # (1) The remedy is the last block; anything before it is context.
+    fenced = fenced[-1:]
     inline = _INLINE_CODE.findall(_FENCED_CODE.sub(" ", text))
-    snippets = [_normalize(s) for s in (*fenced, *inline)]
-    return [s for s in snippets if _is_code_like(s)]
+
+    # (2) Same normalization on both sides, so whitespace cannot smuggle a
+    # complained-about span past the comparison.
+    complained_about = _normalize(finding.message or "")
+
+    snippets: list[str] = []
+    for raw in (*fenced, *inline):
+        snippet = _normalize(raw)
+        if not _is_code_like(snippet):
+            continue
+        if complained_about and snippet in complained_about:
+            continue
+        snippets.append(snippet)
+    return snippets
 
 
 def _already_applied_snippet(finding: Finding, content: str) -> str:
@@ -136,15 +218,56 @@ def _already_applied_snippet(finding: Finding, content: str) -> str:
 
     Residual false-suppression risk, stated rather than hidden: a finding that
     asks for the same change at several call sites is suppressed once any one
-    of them has it. ``_MIN_SNIPPET_CHARS`` and the code-shape filter keep that
-    to snippets specific enough to be meaningful, and the suppression is
-    reported in the review body, so it is visible rather than silent.
+    of them has it. The filters in ``_remedy_snippets`` keep that to snippets
+    specific enough to be meaningful, and the suppression is reported in the
+    review body, so it is visible rather than silent.
     """
     haystack = _normalize(content)
     for snippet in _remedy_snippets(finding):
         if snippet in haystack:
             return snippet
     return ""
+
+
+def _canonical_path(path: str) -> str:
+    """Collapse the ways a model writes the same path into one form.
+
+    Leading slashes, ``./`` prefixes and backslash separators are all shapes
+    Vigil sees from models. A leading slash in particular is not cosmetic:
+    ``quote(path, safe='/')`` in ``github.py`` turns ``/src/a.py`` into a
+    ``contents//src/a.py`` URL, which 404s for a file that is plainly there.
+    """
+    collapsed = _PATH_SEPARATORS.sub("/", path.strip()).lstrip("/")
+    while collapsed.startswith("./"):
+        collapsed = collapsed[2:]
+    return collapsed
+
+
+def _path_resolves_in_diff(path: str, diff_files: Collection[str]) -> bool:
+    """True when ``path`` plausibly names a file the diff actually touches.
+
+    Deliberately the same family of matches ``diff_parser`` already uses to
+    relocate a mis-cited finding (exact, suffix, basename) — and deliberately
+    *not* its final "fall back to the first file in the diff" branch, which
+    always succeeds and would disable absence-suppression altogether.
+    """
+    cited = _canonical_path(path)
+    if not cited:
+        return False
+    cited_name = PurePosixPath(cited).name
+    for known in diff_files:
+        candidate = _canonical_path(known)
+        if not candidate:
+            continue
+        if candidate == cited:
+            return True
+        # Wrong-prefix citations run both ways: `app.py` for `src/pkg/app.py`,
+        # and `repo/src/app.py` for `src/app.py`.
+        if candidate.endswith("/" + cited) or cited.endswith("/" + candidate):
+            return True
+        if PurePosixPath(candidate).name == cited_name:
+            return True
+    return False
 
 
 def validate_findings_against_head(
@@ -155,6 +278,7 @@ def validate_findings_against_head(
     token: str,
     fetch_content: Callable[[str, str, str, str, str], str | None] | None = None,
     commit_readable: Callable[[str, str, str, str], bool] | None = None,
+    diff_files: Collection[str] | None = None,
 ) -> tuple[list[Finding], list[SuppressedFinding]]:
     """Split ``findings`` into (supported, suppressed) against head tree content.
 
@@ -163,9 +287,18 @@ def validate_findings_against_head(
     1. ``STALE_FILE_ABSENT`` — GitHub reports no such path at ``head_sha``,
        *and* a probe confirms the commit itself is readable with this token
        (the contents API returns the same 404 for a missing path and for a
-       repository the credentials cannot see).
-    2. ``STALE_FIX_ALREADY_PRESENT`` — the code the finding's own
-       ``suggestion`` asks for is already in the file at ``head_sha``.
+       repository the credentials cannot see), *and* the cited path cannot be
+       matched to any file in ``diff_files``. All three are required: models
+       mis-cite paths constantly (a missing directory prefix, a leading
+       slash), and a mis-cited path on a live defect 404s exactly like a
+       hallucinated one. Vigil already repairs that shape downstream —
+       ``diff_parser.find_best_file_for_finding`` relocates the comment — so
+       suppressing here would be dropping a real finding over a typo, and
+       would do it before the repair ever ran.
+    2. ``STALE_FIX_ALREADY_PRESENT`` — a code span from the finding's own
+       ``suggestion`` that can only be the remedy (see ``_remedy_snippets``
+       for how narrowly that is drawn, and why it has to be) is already in
+       the file at ``head_sha``.
 
     Everything else keeps the finding, including several things that look like
     evidence and are not. A cited line past end-of-file is **not** grounds for
@@ -188,6 +321,11 @@ def validate_findings_against_head(
             None when GitHub reports the path absent at that ref.
         commit_readable: Seam for the corroborating probe, defaulting to
             ``github.commit_is_readable``.
+        diff_files: The paths this PR's diff actually touches, as
+            ``commentable_lines`` reports them. Optional, and its absence is
+            never read as evidence: with no file set (or an empty one) there
+            is nothing to distinguish a mis-cited path from a hallucinated
+            one, so no finding is suppressed for file-absence at all.
 
     Returns:
         ``(supported, suppressed)``. ``supported`` preserves input order and
@@ -200,6 +338,10 @@ def validate_findings_against_head(
 
     fetch = fetch_content or get_file_content_at_commit
     readable = commit_readable or commit_is_readable
+
+    # Materialized once: the caller may hand over a view (``dict.keys()``)
+    # that is cheap to iterate but is walked once per absent file.
+    known_files: tuple[str, ...] = tuple(diff_files or ())
 
     # Per (path, sha), so a review with a dozen findings in one file costs one
     # blob fetch. Deliberately call-scoped, not module-level: a cache that
@@ -234,6 +376,13 @@ def validate_findings_against_head(
             continue
 
         if content is None:
+            # A 404 on the literal cited path is not on its own evidence that
+            # the file is gone — it is equally the signature of a path the
+            # model got slightly wrong. Only a path with no counterpart
+            # anywhere in the diff is evidence of anything.
+            if not known_files or _path_resolves_in_diff(finding.file, known_files):
+                supported.append(finding)
+                continue
             if head_readable is None:
                 try:
                     head_readable = readable(owner, repo, head_sha, token)
