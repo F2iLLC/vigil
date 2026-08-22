@@ -8,6 +8,7 @@ import httpx
 
 from .comment_manager import deduplicate_comments
 from .diff_parser import commentable_lines, find_best_file_for_finding, nearest_commentable_line
+from .finding_validation import SuppressedFinding, validate_findings_against_head
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
 from .utils import (
     NOT_REVIEWED_ICON,
@@ -272,6 +273,41 @@ def _build_advisory_findings_section(
     return "\n".join(lines)
 
 
+def _build_suppressed_findings_section(
+    suppressed: list[SuppressedFinding],
+    head_sha: str = "",
+) -> str:
+    """Build markdown for findings the head-content guard withheld (#74).
+
+    These are reported, not deleted. The defect this guard exists to fix was
+    a review asserting things about content the cited commit did not contain;
+    a guard that answered it by quietly removing findings would leave nobody
+    able to tell a suppression from a review that simply found less. Each
+    entry keeps its location and severity and states why it was withheld, so
+    a wrong suppression is arguable on the PR itself.
+    """
+    if not suppressed:
+        return ""
+    at = f" at `{head_sha[:7]}`" if head_sha else ""
+    lines = [
+        f"### Suppressed Findings ({len(suppressed)} not supported{at})\n",
+        "*Withheld before posting: the file each one cites, or the change it "
+        "asks for, is not what the reviewed commit actually contains — so the "
+        "finding describes older content than the SHA it carries "
+        "(F2iLLC/vigil#74). Listed here rather than dropped silently.*\n",
+    ]
+    for item in suppressed:
+        f = item.finding
+        loc = f"`{f.file}" + (f":{f.line}" if f.line else "") + "`"
+        msg = f.message if len(f.message) <= 100 else f.message[:97] + "..."
+        lines.append(
+            f"- {severity_emoji(f.severity)} [{f.severity.value.upper()}] "
+            f"{loc} — {msg} — *withheld: {item.reason_text}*"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _place_finding_inline(
     f: Finding,
     persona: str | None,
@@ -414,6 +450,13 @@ def post_review(
 
     Observations were already summary-only and stay that way.
 
+    Before any of that, findings are checked against the content of
+    ``result.commit_sha`` itself and any that the reviewed commit positively
+    contradicts are withheld and reported under **Suppressed Findings**
+    (F2iLLC/vigil#74). That check never alters ``result.decision`` and fails
+    open on every error, so it can subtract text from a review but can never
+    turn a blocking one into an approval.
+
     When multiple specialists flag the same issue, merged findings are posted
     with special formatting showing which specialists flagged the issue.
 
@@ -472,6 +515,62 @@ def post_review(
                 result.lead_findings = [f for f in result.lead_findings if id(f) not in removed_ids]
         except Exception as e:
             log.debug("Cross-round filtering failed: %s", e)
+
+    # --- Step 0b: Head-content validation (#74) ---
+    # Findings are stamped with result.commit_sha and posted as the review's
+    # commit_id. Nothing checked that the cited file and code support the
+    # claim at that commit, so a finding about pre-rebase content could be
+    # published under a correct-looking post-rebase SHA. Anything the guard
+    # cannot positively disprove survives; see finding_validation for why the
+    # bias runs that way and only that way.
+    #
+    # Deliberately does NOT touch result.decision. Losing every finding does
+    # not turn a REQUEST_CHANGES into an APPROVE here: the verdict, the
+    # submitted event, and therefore the approve-only cleanup paths in cli.py
+    # (dismissing Vigil's own stale blocks, #48, and resolving its open
+    # threads, #61) behave exactly as they did before. A validation outage
+    # must never be able to hand a PR a green gate.
+    suppressed_findings: list[SuppressedFinding] = []
+    findings_at_head = [f for v in result.specialist_verdicts for f in v.findings]
+    findings_at_head.extend(result.lead_findings)
+    if result.commit_sha and findings_at_head:
+        try:
+            _, suppressed_findings = validate_findings_against_head(
+                findings_at_head, owner, repo, result.commit_sha, token,
+                diff_files=list(valid_lines),
+            )
+
+            # The rebuild lives inside the `try` on purpose: it is the step
+            # that actually removes findings from the review, so an exception
+            # here has to fail open the same way the validation call does.
+            # Outside it, a raise mid-rebuild would leave findings deleted
+            # from the verdicts with `suppressed_findings` never reported —
+            # i.e. silently dropped, which is the #74 failure mode itself.
+            if suppressed_findings:
+                stale_ids = {id(item.finding) for item in suppressed_findings}
+                # Every list is computed before anything is assigned, so a
+                # partially-applied rebuild is not a reachable state.
+                kept_per_verdict = [
+                    (v, [f for f in v.findings if id(f) not in stale_ids])
+                    for v in result.specialist_verdicts
+                ]
+                kept_lead = [
+                    f for f in result.lead_findings if id(f) not in stale_ids
+                ]
+                log.info(
+                    "Withheld %d finding(s) not supported by %s",
+                    len(stale_ids), result.commit_sha[:7],
+                )
+                for verdict, kept in kept_per_verdict:
+                    verdict.findings = kept
+                result.lead_findings = kept_lead
+        except Exception as e:  # noqa: BLE001 — validation never fails a review
+            log.warning(
+                "Head-content validation failed (%s: %s) — posting every "
+                "finding unvalidated",
+                type(e).__name__, e,
+            )
+            suppressed_findings = []
 
     # --- Step 1: Route findings — inline only on a blocking verdict (#52) ---
     blocking_verdict = is_blocking_decision(result.decision)
@@ -542,6 +641,10 @@ def post_review(
             text += "\n\n" + _build_advisory_findings_section(advisory_findings)
         if body_findings:
             text += "\n\n" + _build_body_findings_section(body_findings)
+        if suppressed_findings:
+            text += "\n\n" + _build_suppressed_findings_section(
+                suppressed_findings, result.commit_sha,
+            )
         for c in appended or []:
             text += f"\n\n**{c['path']}:{c['line']}**\n{c['body']}"
         return text
