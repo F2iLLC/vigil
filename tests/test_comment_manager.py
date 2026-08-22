@@ -669,6 +669,48 @@ class TestBuildConversationContext:
         assert "maintainer" in result
         assert "timeout test" in result
 
+    def test_excludes_vigils_own_issue_comment_from_the_context(self):
+        """F2iLLC/vigil#74: the same exclusion, on the loop that lacked it.
+
+        When every PR Review API attempt fails, post_review falls back to
+        posting the whole review body — findings text included — as an *issue*
+        comment, and issue comments arrive through the comments loop, not the
+        reviews loop. So Vigil read its own prior CRITICAL findings back in as
+        "PR Conversation" evidence and could re-assert a defect a later commit
+        had already removed.
+        """
+        comments = [{
+            "created_at": "2026-07-15T11:00:00Z",
+            "user": {"login": "vigil-reviewer"},
+            "body": (
+                "## ❌ Vigil Review: **REQUEST_CHANGES**\n\n"
+                "Cannot find namespace JSX in AdminUserList.tsx\n\n"
+                "*Reviewed by [Vigil](https://github.com/F2iProject/vigil)*"
+            ),
+        }]
+
+        assert build_conversation_context(comments) == ""
+
+    def test_keeps_human_comments_alongside_an_excluded_vigil_comment(self):
+        comments = [
+            {
+                "created_at": "2026-07-15T11:00:00Z",
+                "user": {"login": "vigil-reviewer"},
+                "body": "Stale JSX finding\n\nReviewed by [Vigil]",
+            },
+            {
+                "created_at": "2026-07-15T12:00:00Z",
+                "user": {"login": "maintainer"},
+                "body": "CI typecheck passes on this head; that finding is wrong.",
+            },
+        ]
+
+        result = build_conversation_context(comments)
+
+        assert "Stale JSX finding" not in result
+        assert "maintainer" in result
+        assert "CI typecheck passes" in result
+
     def test_skips_reviews_without_body(self):
         reviews = [{
             "submitted_at": "2026-07-15T11:00:00Z",

@@ -118,6 +118,9 @@ def build_conversation_context(
 ) -> str:
     """Format PR conversation comments + review summaries for specialist context.
 
+    Vigil's own output is excluded from **both** sources: a prior verdict is
+    generated evidence about an older head, not independent conversation.
+
     Returns chronologically-ordered, truncated plain text — empty string if
     there's nothing to show. Items are dropped (not further truncated) once
     the total budget is exhausted, with a note of how many were omitted, so
@@ -129,6 +132,19 @@ def build_conversation_context(
     for c in comments:
         body = (c.get("body") or "").strip()
         if not body:
+            continue
+        # Same exclusion as the reviews loop below, and for the same reason —
+        # it was missing here, which made the exclusion ineffective. When the
+        # PR Review API rejects every attempt, post_review falls back to
+        # posting the whole review body as an *issue* comment, and issue
+        # comments arrive through this loop. So Vigil's own prior findings
+        # re-entered the next round's prompt as "PR Conversation" evidence and
+        # could anchor a re-review on a defect a later commit removed
+        # (F2iLLC/vigil#74). A human reply that quotes the whole review
+        # verbatim, signature included, is excluded too; that is the safe
+        # direction, and a human's own words are only lost when they carry no
+        # text of their own.
+        if VIGIL_SIGNATURE in body:
             continue
         items.append((
             c.get("created_at", ""),

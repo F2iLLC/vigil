@@ -25,7 +25,12 @@ from .comment_manager import (
 )
 from .decision_log import clear_decisions, get_decisions, remove_decision
 from .diff_parser import commentable_lines, parse_diff
-from .github import get_changed_files_between_commits, get_pr_data, parse_pr_url
+from .github import (
+    get_changed_files_between_commits,
+    get_pr_data,
+    is_ancestor_commit,
+    parse_pr_url,
+)
 from .github_review import post_review, react, remove_reaction
 from .issue_manager import create_issues_for_observations
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
@@ -174,6 +179,36 @@ def _rereview_reasons(
     return reasons
 
 
+def _history_diverged(
+    owner: str, repo: str, last_sha: str, head_sha: str, token: str,
+) -> bool:
+    """Has the branch been rebased/force-pushed since ``last_sha``?
+
+    A rebase does not announce itself. ``compare/{base}...{head}`` does not
+    404 for an orphaned-but-reachable base SHA — it quietly answers against
+    the merge base instead, so ``changed_files`` silently becomes the whole
+    PR rather than "changed since the last review", and the ``except`` around
+    that call only fires when the SHA is unreachable outright. The
+    consequence is not a bigger review (the review always uses the full
+    base-to-head diff anyway) but a bogus ``changed_line_map``, which is fed
+    to ``resolve_addressed_threads`` — that map is the sole evidence for
+    auto-resolving Vigil's own threads, so a rebase could resolve threads
+    whose code nobody touched (F2iLLC/vigil#74).
+
+    Fails **open**: an error here reports "not diverged", which is exactly
+    the behaviour that shipped before this check existed. Losing the check
+    must never cost more than the check was worth.
+    """
+    try:
+        return not is_ancestor_commit(owner, repo, last_sha, head_sha, token)
+    except Exception as e:
+        console.print(
+            f"[dim yellow]Could not check whether {last_sha[:7]} is still an "
+            f"ancestor of head ({e}) — assuming it is[/dim yellow]"
+        )
+        return False
+
+
 @app.command()
 def review(
     pr_url: str = typer.Argument(help="GitHub PR URL"),
@@ -290,6 +325,21 @@ def review(
                 console.print(
                     "[dim]No files changed since last review, but re-reviewing: "
                     f"{'; '.join(reasons)}[/dim]"
+                )
+            elif _history_diverged(owner, repo, last_sha, pr_data["head_sha"], token):
+                # The last-reviewed commit is no longer an ancestor of head:
+                # the branch was rebased or force-pushed, so `changed_files`
+                # above is the whole PR against the merge base, not what
+                # moved since the last review. Treat the round as a fresh
+                # review — the review itself is unaffected (it always uses the
+                # full base-to-head diff), but thread auto-resolution is
+                # skipped rather than run against evidence that does not mean
+                # what it says (F2iLLC/vigil#74).
+                console.print(
+                    f"[dim yellow]History diverged since {last_sha[:7]} "
+                    "(rebase or force-push) — reviewing fresh and leaving "
+                    "existing threads for this round to re-evaluate"
+                    "[/dim yellow]"
                 )
             else:
                 console.print(f"[dim]Incremental review: {len(changed_files)} file(s) changed since {last_sha[:7]}[/dim]")
@@ -572,6 +622,17 @@ def resolve_addressed(
 
     if not changed_files:
         console.print("[dim]No files changed since last review[/dim]")
+        raise typer.Exit(0)
+
+    # Same rebase guard as the review path: after a force-push `changed_files`
+    # is the whole PR, so the line map below would authorize resolving threads
+    # whose code this push never touched (F2iLLC/vigil#74).
+    if _history_diverged(owner, repo, last_sha, pr_data["head_sha"], token):
+        console.print(
+            f"[dim yellow]History diverged since {last_sha[:7]} (rebase or "
+            "force-push) — not resolving threads against a comparison that no "
+            "longer means 'changed since the last review'[/dim yellow]"
+        )
         raise typer.Exit(0)
 
     console.print(f"[dim]{len(changed_files)} file(s) changed since last review[/dim]")
