@@ -139,6 +139,7 @@ def wire_review(
     resolved_threads: int = 0,
     dismiss_ok: bool = True,
     threads: list[dict] | None = None,
+    ancestor: bool = True,
 ):
     """Wire cli.review against fake GitHub I/O, returning a call recorder.
 
@@ -146,11 +147,16 @@ def wire_review(
     mutates it in place the way GitHub would, so multi-run sequences stay
     faithful. `threads` does the same for the GraphQL review-thread boundary:
     the fake resolve mutation flips `isResolved` in place.
+
+    `ancestor` is the ancestry answer for the last-reviewed SHA: True is the
+    ordinary case (new commits on top of it), False is a rebase or force-push,
+    where `compare` silently answers against the merge base instead of erroring
+    (F2iLLC/vigil#74).
     """
     threads = [] if threads is None else threads
     rec = SimpleNamespace(
         review_diffs=[], dismissals=[], posted=[], reviews=reviews,
-        threads=threads, resolved_thread_ids=[],
+        threads=threads, resolved_thread_ids=[], addressed_calls=[],
     )
 
     monkeypatch.setenv("GITHUB_TOKEN", "token")
@@ -199,9 +205,14 @@ def wire_review(
 
     monkeypatch.setattr(comment_manager, "_graphql", fake_graphql)
 
+    def fake_resolve_addressed(*args, **kwargs):
+        rec.addressed_calls.append(args)
+        return 0
+
     monkeypatch.setattr(cli, "resolve_dismissed_threads", lambda *a: resolved_threads)
-    monkeypatch.setattr(cli, "resolve_addressed_threads", lambda *a, **k: 0)
+    monkeypatch.setattr(cli, "resolve_addressed_threads", fake_resolve_addressed)
     monkeypatch.setattr(cli, "get_changed_files_between_commits", lambda *a: list(changed_files))
+    monkeypatch.setattr(cli, "is_ancestor_commit", lambda *a: ancestor)
     monkeypatch.setattr(cli, "fetch_all_vigil_comments", lambda *a: [])
     monkeypatch.setattr(cli, "write_audit_entry", lambda *a, **k: "/tmp/audit.db")
     monkeypatch.setattr(cli, "react", lambda *a: None)
@@ -516,6 +527,158 @@ class TestRereviewGate:
         assert rec.posted == ["APPROVE"]
         assert [d[0] for d in rec.dismissals] == [1]
         assert select_outstanding_vigil_blocks(reviews) == []
+
+
+# ---------- issue #74: a rebased last-reviewed SHA ----------
+
+class TestRebasedHistoryIsTreatedAsAFreshReview:
+    """A force-push does not announce itself.
+
+    `compare/{base}...{head}` does NOT 404 for an orphaned-but-reachable base
+    SHA — it quietly computes against the merge base instead, so
+    `changed_files` becomes the entire PR file set rather than "changed since
+    the last review", and the `except` around that call never fires. The
+    review itself is unaffected (it always uses the full base-to-head diff),
+    but `changed_line_map` is the sole evidence for auto-resolving Vigil's own
+    threads, so the round would resolve threads whose code nobody touched.
+    """
+
+    def test_premise_an_ordinary_push_still_resolves_addressed_threads(self, monkeypatch):
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"],
+        )
+        run_review()
+        assert len(rec.addressed_calls) == 1
+
+    def test_a_diverged_last_sha_resolves_no_threads(self, monkeypatch):
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_a.py", "file_b.py"],
+            ancestor=False,
+        )
+        run_review()
+        assert rec.addressed_calls == []
+
+    def test_a_diverged_last_sha_still_produces_a_full_review(self, monkeypatch):
+        """Fresh review, not no review — the round must still post a verdict."""
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_a.py", "file_b.py"],
+            ancestor=False,
+            decision="REQUEST_CHANGES",
+        )
+        run_review()
+        assert rec.review_diffs == [FULL_DIFF]
+        assert rec.posted == ["REQUEST_CHANGES"]
+
+    def test_an_ancestry_check_that_fails_degrades_to_the_old_behaviour(self, monkeypatch):
+        """Fails open: losing the check must cost no more than the check."""
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"],
+        )
+
+        def boom(*a):
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(cli, "is_ancestor_commit", boom)
+        run_review()
+        assert len(rec.addressed_calls) == 1
+
+
+def wire_resolve_addressed(
+    monkeypatch,
+    *,
+    changed_files: list[str],
+    last_sha: str = SHA_A,
+    head_sha: str = SHA_C,
+    ancestor: bool = True,
+    dismissed: int = 0,
+):
+    """Wire `cli.resolve_addressed` against fake GitHub I/O.
+
+    The second, standalone entry point into the same rebase hazard: the
+    `resolve-addressed` command runs the identical compare-and-resolve
+    sequence as the review path, but from a workflow step of its own, so the
+    divergence guard has to hold on both. Only the GitHub boundary is faked —
+    the real `_history_diverged`, the real line-map construction and the real
+    control flow all run.
+    """
+    rec = SimpleNamespace(addressed_calls=[], resolved_maps=[])
+
+    monkeypatch.setenv("GITHUB_TOKEN", "token")
+    monkeypatch.setattr(cli, "parse_pr_url", lambda pr_url: ("F2iLLC", "demo", 1))
+    monkeypatch.setattr(
+        cli, "get_pr_data",
+        lambda *a: {"head_sha": head_sha, "diff": FULL_DIFF, "url": PR_URL},
+    )
+    monkeypatch.setattr(cli, "get_last_reviewed_sha", lambda *a: last_sha)
+    monkeypatch.setattr(cli, "resolve_dismissed_threads", lambda *a: dismissed)
+    monkeypatch.setattr(
+        cli, "get_changed_files_between_commits", lambda *a: list(changed_files),
+    )
+    monkeypatch.setattr(cli, "is_ancestor_commit", lambda *a: ancestor)
+
+    def fake_resolve_addressed_threads(owner, repo, pr_number, token, line_map):
+        rec.addressed_calls.append((owner, repo, pr_number))
+        rec.resolved_maps.append(line_map)
+        return 1
+
+    monkeypatch.setattr(
+        cli, "resolve_addressed_threads", fake_resolve_addressed_threads,
+    )
+    return rec
+
+
+class TestResolveAddressedHonoursTheSameDivergenceGuard:
+    """`resolve-addressed` is the other way into `resolve_addressed_threads`.
+
+    `changed_line_map` is the sole evidence Vigil has for auto-resolving its
+    own threads. After a force-push `get_changed_files_between_commits`
+    silently answers against the merge base instead of erroring, so that map
+    becomes the whole PR and the command would resolve threads whose code this
+    push never touched. The review path asserts this above; this command has
+    its own copy of the sequence and needs its own assertion.
+    """
+
+    def test_premise_an_ordinary_push_resolves_addressed_threads(self, monkeypatch):
+        rec = wire_resolve_addressed(monkeypatch, changed_files=["file_b.py"])
+
+        # The resolving path runs to completion rather than exiting early.
+        cli.resolve_addressed(PR_URL)
+
+        assert rec.addressed_calls == [("F2iLLC", "demo", 1)]
+        # Scoped to what actually moved, never the whole PR.
+        assert set(rec.resolved_maps[0]) == {"file_b.py"}
+
+    def test_a_diverged_last_sha_resolves_no_threads(self, monkeypatch):
+        rec = wire_resolve_addressed(
+            monkeypatch, changed_files=["file_a.py", "file_b.py"], ancestor=False,
+        )
+
+        with pytest.raises(typer.Exit) as exit_info:
+            cli.resolve_addressed(PR_URL)
+
+        assert exit_info.value.exit_code == 0
+        assert rec.addressed_calls == []
+
+    def test_an_ancestry_check_that_fails_degrades_to_the_old_behaviour(self, monkeypatch):
+        """Fails open here too: losing the check costs no more than the check."""
+        rec = wire_resolve_addressed(monkeypatch, changed_files=["file_b.py"])
+
+        def boom(*a):
+            raise httpx.ConnectError("connection refused")
+
+        monkeypatch.setattr(cli, "is_ancestor_commit", boom)
+
+        cli.resolve_addressed(PR_URL)
+
+        assert len(rec.addressed_calls) == 1
 
 
 # ---------- issue #48: withdrawing Vigil's own block ----------
