@@ -3,15 +3,24 @@
 import difflib
 import logging
 from collections import defaultdict
+from pathlib import PurePosixPath
 
 import httpx
 
 from .comment_manager import deduplicate_comments
-from .diff_parser import commentable_lines, find_best_file_for_finding, nearest_commentable_line
-from .finding_validation import SuppressedFinding, validate_findings_against_head
+from .context_manager import stable_finding_key
+from .diff_parser import commentable_lines, nearest_commentable_line
+from .finding_validation import (
+    STALE_EVIDENCE_COMMIT,
+    STALE_HISTORICAL_EVIDENCE,
+    UNSUPPORTED_CURRENT_STATUS,
+    SuppressedFinding,
+    validate_findings_against_head,
+)
 from .models import Finding, PersonaVerdict, ReviewResult, Severity
 from .utils import (
     NOT_REVIEWED_ICON,
+    embed_json_metadata,
     extract_message_content,
     github_headers,
     not_reviewed_label,
@@ -89,7 +98,21 @@ def _format_inline_comment(f: Finding, persona: str | None = None, session_id: s
     source = f" **{persona}**" if persona else ""
     sid = f" `{session_id}`" if session_id else ""
     suggestion = f"\n\n**Suggestion:** {f.suggestion}" if f.suggestion else ""
-    return f"{icon} **[{f.severity.value.upper()}]** [{f.category}]{source}{sid}\n\n{f.message}{suggestion}"
+    metadata = embed_json_metadata({
+        "severity": f.severity.value,
+        "category": f.category,
+        "message": f.message,
+        "suggestion": f.suggestion,
+        "component": f.component,
+        "predicate": f.predicate,
+        "evidence_source": f.evidence_source,
+        "evidence_commit": f.evidence_commit,
+        "finding_key": stable_finding_key(f),
+    })
+    return (
+        f"{icon} **[{f.severity.value.upper()}]** [{f.category}]{source}{sid}\n\n"
+        f"{f.message}{suggestion}\n\n{metadata}"
+    )
 
 
 def _build_review_body(
@@ -314,7 +337,7 @@ def _place_finding_inline(
     session_id: str,
     valid_lines: dict[str, set[int]],
 ) -> dict | None:
-    """Try to place a finding as an inline comment, relocating if needed.
+    """Place a finding only on its own file (or a unique path repair).
 
     Returns an inline comment dict, or None if no valid position exists.
     """
@@ -324,8 +347,20 @@ def _place_finding_inline(
 
     if result is None:
         # File not in diff — find the best alternative file
-        result = find_best_file_for_finding(f.file, valid_lines)
-        if result is not None:
+        cited = f.file.replace("\\", "/").strip("./")
+        cited_name = PurePosixPath(cited).name
+        candidates = [
+            path for path, lines in valid_lines.items()
+            if lines and (
+                path == cited
+                or path.endswith("/" + cited)
+                or cited.endswith("/" + path)
+                or PurePosixPath(path).name == cited_name
+            )
+        ]
+        result = None
+        if len(candidates) == 1:
+            result = nearest_commentable_line(candidates[0], f.line, valid_lines)
             relocated_from = f"{f.file}:{f.line or '?'}"
 
     elif result[1] != f.line or result[0] != f.file:
@@ -524,11 +559,14 @@ def post_review(
     # cannot positively disprove survives; see finding_validation for why the
     # bias runs that way and only that way.
     #
-    # Deliberately does NOT touch result.decision. Losing every finding does
+    # The legacy #74 reasons deliberately do NOT touch result.decision. Losing every finding does
     # not turn a REQUEST_CHANGES into an APPROVE here: the verdict, the
     # submitted event, and therefore the approve-only cleanup paths in cli.py
     # (dismissing Vigil's own stale blocks, #48, and resolving its open
-    # threads, #61) behave exactly as they did before. A validation outage
+    # threads, #61) behave exactly as they did before. The structured
+    # provenance/status reasons added by #77 are handled narrowly below: when
+    # they are the only reasons and no blocker remains, the submitted event is
+    # COMMENT rather than REQUEST_CHANGES. A validation outage
     # must never be able to hand a PR a green gate.
     suppressed_findings: list[SuppressedFinding] = []
     findings_at_head = [f for v in result.specialist_verdicts for f in v.findings]
@@ -573,7 +611,25 @@ def post_review(
             suppressed_findings = []
 
     # --- Step 1: Route findings — inline only on a blocking verdict (#52) ---
-    blocking_verdict = is_blocking_decision(result.decision)
+    remaining_findings = [
+        f for verdict in result.specialist_verdicts for f in verdict.findings
+    ] + list(result.lead_findings)
+    nonblocking_evidence_reasons = {
+        STALE_HISTORICAL_EVIDENCE,
+        STALE_EVIDENCE_COMMIT,
+        UNSUPPORTED_CURRENT_STATUS,
+    }
+    deblocked_stale_only = bool(
+        is_blocking_decision(result.decision)
+        and findings_at_head
+        and not remaining_findings
+        and suppressed_findings
+        and all(
+            item.reason in nonblocking_evidence_reasons
+            for item in suppressed_findings
+        )
+    )
+    blocking_verdict = is_blocking_decision(result.decision) and not deblocked_stale_only
 
     inline_comments: list[dict] = []
     body_findings: list[tuple[str | None, Finding]] = []
@@ -598,8 +654,8 @@ def post_review(
             else:
                 body_findings.append((None, f))
     else:
-        # The review's own verdict says nothing here blocks the merge, so
-        # nothing here may open a review thread. Report it all in the body.
+        # Either the review is nonblocking or its only blockers were
+        # deterministically stale/unsupported. Nothing here may open a thread.
         for v in result.specialist_verdicts:
             for f in v.findings:
                 advisory_findings.append((v.persona, f))
@@ -634,8 +690,19 @@ def post_review(
         fallback ladder passes 0 once the inline comments have been folded
         into the text via ``appended``.
         """
+        displayed_result = result
+        if deblocked_stale_only:
+            displayed_result = result.model_copy(update={
+                "decision": "COMMENT",
+                "summary": (
+                    "No current blocking finding remained after exact-head "
+                    "evidence validation. " + result.summary
+                ),
+            })
         text = _build_review_body(
-            result, inline_count=inline_count, observation_issues=observation_issues,
+            displayed_result,
+            inline_count=inline_count,
+            observation_issues=observation_issues,
         )
         if advisory_findings:
             text += "\n\n" + _build_advisory_findings_section(advisory_findings)
@@ -658,6 +725,8 @@ def post_review(
         "BLOCK": "REQUEST_CHANGES",  # GitHub has no BLOCK event
     }
     event = event_map.get(result.decision, "COMMENT")
+    if deblocked_stale_only:
+        event = "COMMENT"
 
     # Tracks what GitHub actually accepted, as the fallback ladder degrades.
     submitted_event = event

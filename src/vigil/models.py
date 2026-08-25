@@ -19,6 +19,15 @@ class Finding(BaseModel):
     category: str
     message: str
     suggestion: str | None = None
+    # Machine-readable review evidence.  These fields are optional for
+    # backwards compatibility with older model responses and persisted
+    # comments, but new prompts require them.  They let deterministic review
+    # stages distinguish a current-head assertion from a claim copied out of
+    # historical PR discussion.
+    component: str = ""
+    predicate: str = ""
+    evidence_source: str = "unknown"
+    evidence_commit: str = ""
 
 
 # Machine-stable values for PersonaVerdict.skip_reason (F2iLLC/vigil#66).

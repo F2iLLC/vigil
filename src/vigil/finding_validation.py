@@ -10,9 +10,12 @@ every one of those commits — repo-wide CI typecheck passed the whole time. The
 finding text described pre-rebase content; only the SHA was current, which is
 the worst possible combination because the SHA is what makes it look verified.
 
-This module is the guard. Its bias is asymmetric and deliberate:
+This module is the guard. Its bias is asymmetric and deliberate for legacy
+findings, while new structured findings add positive provenance and exact-head
+check evidence:
 
-  * A finding is suppressed ONLY on positive evidence of staleness.
+  * A finding is suppressed ONLY on positive evidence of staleness or a
+    structured current-status claim with no corroborating failed check.
   * Anything ambiguous keeps the finding — an unresolvable line, a mis-cited
     path, a message with no citable remedy, an unreadable blob, and *any* API
     failure at all.
@@ -45,7 +48,7 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Callable
 
-from .github import commit_is_readable, get_file_content_at_commit
+from .github import commit_is_readable, get_check_runs_for_commit, get_file_content_at_commit
 from .models import Finding
 
 log = logging.getLogger(__name__)
@@ -55,12 +58,24 @@ log = logging.getLogger(__name__)
 # changes (same contract as the SKIP_* constants in models.py).
 STALE_FILE_ABSENT = "file_absent_at_head"
 STALE_FIX_ALREADY_PRESENT = "suggested_fix_already_present"
+STALE_HISTORICAL_EVIDENCE = "historical_evidence_not_attributable_to_head"
+STALE_EVIDENCE_COMMIT = "evidence_commit_does_not_match_head"
+UNSUPPORTED_CURRENT_STATUS = "current_status_not_supported_by_failed_check"
 
 _REASON_TEXT: dict[str, str] = {
     STALE_FILE_ABSENT: "the cited file does not exist at the reviewed commit",
     STALE_FIX_ALREADY_PRESENT: (
         "the change this finding asks for is already present in the file at "
         "the reviewed commit"
+    ),
+    STALE_HISTORICAL_EVIDENCE: (
+        "the finding relies on historical conversation rather than current-head evidence"
+    ),
+    STALE_EVIDENCE_COMMIT: (
+        "the finding's supporting commit is not the reviewed commit"
+    ),
+    UNSUPPORTED_CURRENT_STATUS: (
+        "no completed failed check at the reviewed commit supports this status claim"
     ),
 }
 
@@ -107,6 +122,82 @@ _PATH_SEPARATORS = re.compile(r"[\\/]+")
 # which this module reads as the much stronger claim "GitHub says there is no
 # such file at this commit".
 _UNREADABLE = object()
+_STATUS_WORDS = re.compile(
+    r"\b(?:build|compile|compiler|typecheck|tests?|ci)\b.{0,80}"
+    r"\b(?:cannot|error|fail|failed|failing|failure|unresolved)\b|"
+    r"\b(?:cannot|error|fail|failed|failing|failure|unresolved)\b.{0,80}"
+    r"\b(?:build|compile|compiler|typecheck|tests?|ci)\b",
+    re.IGNORECASE,
+)
+_DIAGNOSTIC = re.compile(r"\b(?:TS|CS|E|ERR_)[-_]?\d{3,}\b", re.IGNORECASE)
+_FAILED_CONCLUSIONS = frozenset({
+    "action_required", "cancelled", "failure", "startup_failure", "timed_out",
+})
+
+
+def _same_commit(left: str, right: str) -> bool:
+    """Compare full or safely abbreviated commit IDs without guessing."""
+    a, b = left.strip().lower(), right.strip().lower()
+    if not a or not b:
+        return False
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    return len(shorter) >= 7 and longer.startswith(shorter)
+
+
+def _provenance_contradicts_head(finding: Finding, head_sha: str) -> str:
+    """Return a suppression reason for positively stale evidence provenance.
+
+    Legacy findings carry ``unknown`` and continue through the existing
+    fail-open path.  Factual-accuracy findings are allowed to cite historical
+    conversation because their predicate is a contradiction *in that
+    conversation*, not an assertion that an old failure is still current.
+    """
+    source = finding.evidence_source.strip().lower()
+    category = finding.category.strip().lower().replace("_", "-")
+    if source == "historical_conversation" and category != "factual-accuracy":
+        return STALE_HISTORICAL_EVIDENCE
+    if (
+        source in {"current_diff", "current_check"}
+        and finding.evidence_commit.strip()
+        and not _same_commit(finding.evidence_commit, head_sha)
+    ):
+        return STALE_EVIDENCE_COMMIT
+    return ""
+
+
+def _is_status_assertion(finding: Finding) -> bool:
+    """True for claims that a compiler, build, CI, or test currently fails."""
+    text = " ".join((finding.category, finding.message, finding.predicate))
+    return bool(_DIAGNOSTIC.search(text) or _STATUS_WORDS.search(text))
+
+
+def _failed_check_supports(finding: Finding, checks: list[dict]) -> bool:
+    """Require exact failed-check output to corroborate the claimed symptom."""
+    finding_text = " ".join((finding.message, finding.predicate, finding.component))
+    claimed_codes = {code.upper().replace("-", "_") for code in _DIAGNOSTIC.findall(finding_text)}
+    component = finding.component.strip().lower()
+    component_leaf = component.replace("\\", "/").rstrip("/").split("/")[-1]
+
+    for check in checks:
+        if (check.get("status") or "").lower() != "completed":
+            continue
+        if (check.get("conclusion") or "").lower() not in _FAILED_CONCLUSIONS:
+            continue
+        output = check.get("output") or {}
+        evidence = " ".join((
+            str(check.get("name") or ""),
+            str(output.get("title") or ""),
+            str(output.get("summary") or ""),
+            str(output.get("text") or ""),
+        )).lower()
+        evidence_codes = {
+            code.upper().replace("-", "_") for code in _DIAGNOSTIC.findall(evidence)
+        }
+        if claimed_codes and claimed_codes.intersection(evidence_codes):
+            return True
+        if not claimed_codes and component_leaf and component_leaf in evidence:
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -279,10 +370,12 @@ def validate_findings_against_head(
     fetch_content: Callable[[str, str, str, str, str], str | None] | None = None,
     commit_readable: Callable[[str, str, str, str], bool] | None = None,
     diff_files: Collection[str] | None = None,
+    fetch_checks: Callable[[str, str, str, str], list[dict]] | None = None,
 ) -> tuple[list[Finding], list[SuppressedFinding]]:
     """Split ``findings`` into (supported, suppressed) against head tree content.
 
-    Two things count as positive evidence of staleness, and nothing else does:
+    Five things count as positive evidence that a structured finding cannot be
+    posted as current, and nothing else does:
 
     1. ``STALE_FILE_ABSENT`` — GitHub reports no such path at ``head_sha``,
        *and* a probe confirms the commit itself is readable with this token
@@ -299,6 +392,15 @@ def validate_findings_against_head(
        ``suggestion`` that can only be the remedy (see ``_remedy_snippets``
        for how narrowly that is drawn, and why it has to be) is already in
        the file at ``head_sha``.
+
+    3. ``STALE_HISTORICAL_EVIDENCE`` - a structured finding says its only
+       source is historical conversation (except factual-accuracy findings,
+       whose subject is the conversation itself).
+    4. ``STALE_EVIDENCE_COMMIT`` - structured current evidence names a commit
+       other than the reviewed head.
+    5. ``UNSUPPORTED_CURRENT_STATUS`` - a structured build/test/status claim
+       has no completed failed exact-head check whose output supports its
+       diagnostic or affected component.
 
     Everything else keeps the finding, including several things that look like
     evidence and are not. A cited line past end-of-file is **not** grounds for
@@ -326,6 +428,9 @@ def validate_findings_against_head(
             never read as evidence: with no file set (or an empty one) there
             is nothing to distinguish a mis-cited path from a hallucinated
             one, so no finding is suppressed for file-absence at all.
+        fetch_checks: Seam for exact-head check runs. An API exception keeps
+            status findings unvalidated (fail open); an available empty or
+            pending set positively cannot support a current failure claim.
 
     Returns:
         ``(supported, suppressed)``. ``supported`` preserves input order and
@@ -338,6 +443,7 @@ def validate_findings_against_head(
 
     fetch = fetch_content or get_file_content_at_commit
     readable = commit_readable or commit_is_readable
+    check_fetcher = fetch_checks or get_check_runs_for_commit
 
     # Materialized once: the caller may hand over a view (``dict.keys()``)
     # that is cheap to iterate but is walked once per absent file.
@@ -348,11 +454,44 @@ def validate_findings_against_head(
     # outlived the call would serve one PR's head content to another run.
     cache: dict[tuple[str, str], object] = {}
     head_readable: bool | None = None
+    head_checks: list[dict] | object = _UNREADABLE
+    checks_loaded = False
 
     supported: list[Finding] = []
     suppressed: list[SuppressedFinding] = []
 
     for finding in findings:
+        provenance_reason = _provenance_contradicts_head(finding, head_sha)
+        if provenance_reason:
+            suppressed.append(
+                SuppressedFinding(
+                    finding,
+                    provenance_reason,
+                    finding.evidence_commit or finding.evidence_source,
+                )
+            )
+            continue
+        if _is_status_assertion(finding) and finding.evidence_source in {
+            "current_diff", "current_check",
+        }:
+            if not checks_loaded:
+                checks_loaded = True
+                try:
+                    head_checks = check_fetcher(owner, repo, head_sha, token)
+                except Exception as e:  # noqa: BLE001 - validation API failures fail open
+                    log.warning(
+                        "Could not read checks at %s (%s: %s) - keeping status "
+                        "findings unvalidated",
+                        head_sha[:7], type(e).__name__, e,
+                    )
+                    head_checks = _UNREADABLE
+            if head_checks is not _UNREADABLE and not _failed_check_supports(
+                finding, head_checks,
+            ):
+                suppressed.append(SuppressedFinding(
+                    finding, UNSUPPORTED_CURRENT_STATUS, head_sha,
+                ))
+                continue
         key = (finding.file, head_sha)
         if key not in cache:
             try:

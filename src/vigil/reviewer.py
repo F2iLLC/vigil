@@ -204,6 +204,10 @@ fact that this conversation contradicts, that is a finding (category
 Conversation is historical discussion, not current code. Never repeat a prior
 finding unless the authoritative head diff independently supports it; removed
 (`-`) lines and descriptions of earlier commits are not present in the head tree.
+Each item begins with a `vigil-evidence` provenance label. An item with
+`current_head=false` is deterministically ineligible to support a current-state
+blocking finding. If it reveals useful follow-up, report that as an observation
+with `evidence_source=historical_conversation`; do not relabel it as current.
 ```
 {conversation}
 ```
@@ -248,6 +252,10 @@ about code this PR does not touch.
 **Author:** {pr_context['author']}
 **Branch:** {pr_context['head']} -> {pr_context['base']}
 **Authoritative head commit:** {head_sha}
+Every blocking finding must name its evidence in the structured fields. Set
+the evidence source to `current_diff` only for added/context lines below
+and set `evidence_commit={head_sha}`. Historical conversation is never proof
+that this head's build or tests fail.
 **Stats:** +{pr_context['additions']} -{pr_context['deletions']} across {pr_context['changed_files']} files
 
 ### Description

@@ -3,7 +3,6 @@
 import difflib
 import logging
 import re
-from collections import defaultdict
 from dataclasses import dataclass, field
 
 import httpx
@@ -115,6 +114,7 @@ def build_conversation_context(
     reviews: list[dict] | None = None,
     max_total_chars: int = _MAX_CONVERSATION_CHARS,
     max_item_chars: int = _MAX_CONVERSATION_ITEM_CHARS,
+    head_sha: str = "",
 ) -> str:
     """Format PR conversation comments + review summaries for specialist context.
 
@@ -127,7 +127,10 @@ def build_conversation_context(
     the most recent thread activity is always preserved in favor of older
     entries when a PR has an unusually long history.
     """
-    items: list[tuple[str, str, str, str]] = []  # (timestamp, author, body, kind)
+    # timestamp, author, body, kind, attributed commit.  Top-level comments
+    # are intentionally unattributed: their creation time does not prove what
+    # tree the author inspected.
+    items: list[tuple[str, str, str, str, str]] = []
 
     for c in comments:
         body = (c.get("body") or "").strip()
@@ -150,7 +153,8 @@ def build_conversation_context(
             c.get("created_at", ""),
             c.get("user", {}).get("login", "unknown"),
             body,
-            "comment",
+            "human_comment",
+            "",
         ))
 
     for r in reviews or []:
@@ -170,6 +174,7 @@ def build_conversation_context(
             r.get("user", {}).get("login", "unknown"),
             body,
             f"review:{state}" if state else "review",
+            r.get("commit_id") or "",
         ))
 
     if not items:
@@ -183,10 +188,18 @@ def build_conversation_context(
     kept: list[str] = []
     total = 0
     omitted = 0
-    for created_at, author, body, kind in reversed(items):
+    for created_at, author, body, kind, evidence_commit in reversed(items):
         if len(body) > max_item_chars:
             body = body[:max_item_chars] + " …[truncated]"
-        entry = f"**{author}** ({kind}, {created_at}):\n{body}"
+        attributable = bool(
+            head_sha and evidence_commit and evidence_commit.lower() == head_sha.lower()
+        )
+        commit_label = evidence_commit[:12] if evidence_commit else "unattributed"
+        entry = (
+            f"[vigil-evidence source={kind} commit={commit_label} "
+            f"current_head={'true' if attributable else 'false'}]\n"
+            f"**{author}** ({kind}, {created_at}):\n{body}"
+        )
         if total + len(entry) > max_total_chars:
             omitted += 1
             continue
@@ -950,10 +963,9 @@ def is_duplicate_finding(
 ) -> bool:
     """Check if a new inline comment duplicates an existing Vigil comment.
 
-    Match criteria (ALL must be true):
-    1. Same file path
-    2. Same line (or within 3 lines)
-    3. Message similarity >= threshold
+    Structured comments first match by a stable semantic finding key that is
+    independent of category, line, and presentation anchor. Legacy comments
+    retain the old path/line/text fallback.
     """
     new_path = new_comment.get("path", "")
     new_line = new_comment.get("line", 0)
@@ -962,10 +974,22 @@ def is_duplicate_finding(
     if not new_text:
         return False
 
+    from .context_manager import extract_finding_from_comment, stable_finding_key
+
+    new_finding = extract_finding_from_comment(
+        new_comment.get("body", ""), new_path, new_line,
+    )
+    new_key = stable_finding_key(new_finding) if new_finding else ""
+
     for existing in existing_comments:
+        existing_line = existing.get("line") or existing.get("original_line") or 0
+        existing_finding = extract_finding_from_comment(
+            existing.get("body", ""), existing.get("path"), existing_line,
+        )
+        if new_key and existing_finding and new_key == stable_finding_key(existing_finding):
+            return True
         if existing.get("path") != new_path:
             continue
-        existing_line = existing.get("line") or existing.get("original_line") or 0
         if abs(existing_line - new_line) > 3:
             continue
         existing_text = _extract_message_content(existing.get("body", ""))
@@ -1001,18 +1025,9 @@ def deduplicate_comments(
     if not existing_comments:
         return list(new_comments)
 
-    # Index existing comments by path for O(1) lookup
-    by_path: dict[str, list[dict]] = defaultdict(list)
-    for c in existing_comments:
-        path = c.get("path", "")
-        if path:
-            by_path[path].append(c)
-
     result = []
     for c in new_comments:
-        path = c.get("path", "")
-        candidates = by_path.get(path, [])
-        if not candidates or not is_duplicate_finding(c, candidates, threshold):
+        if not is_duplicate_finding(c, existing_comments, threshold):
             result.append(c)
     return result
 

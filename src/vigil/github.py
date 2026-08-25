@@ -212,3 +212,24 @@ def commit_is_readable(owner: str, repo: str, sha: str, token: str) -> bool:
             return False
         resp.raise_for_status()
         return True
+
+
+def get_check_runs_for_commit(
+    owner: str, repo: str, sha: str, token: str,
+) -> list[dict]:
+    """Fetch check runs attached to exactly ``sha``.
+
+    Callers receive the raw stable fields needed to prove a current build/test
+    assertion.  This helper raises on API failure so the validation layer can
+    preserve its explicit fail-open/fail-loud contract instead of confusing an
+    outage with an empty check set.
+    """
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits/{sha}/check-runs"
+    with httpx.Client(follow_redirects=True) as client:
+        resp = client.get(url, headers=headers, params={"per_page": 100}, timeout=30)
+        resp.raise_for_status()
+        return list((resp.json() or {}).get("check_runs") or [])

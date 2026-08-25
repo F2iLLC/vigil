@@ -18,7 +18,11 @@ Respond with valid JSON matching this schema:
       "severity": "critical | high | medium | low",
       "category": "string",
       "message": "string",
-      "suggestion": "string or null"
+      "suggestion": "string or null",
+      "component": "stable affected package/module/service name",
+      "predicate": "short stable defect statement independent of wording",
+      "evidence_source": "current_diff | current_check | historical_conversation | external_context | unknown",
+      "evidence_commit": "the supporting commit SHA, or empty string"
     }
   ],
   "observations": [
@@ -81,6 +85,11 @@ FACTUAL CLAIMS VS. THREAD EVIDENCE:
   compliance/audit files); medium otherwise.
 - A logically correct implementation of a false claim is still a bug. Do not
   let clean code style suppress this check.
+- Historical conversation can explain a prior failure, but it cannot support
+  a claim that the current build or tests fail. Set evidence_source to
+  "historical_conversation" for any claim learned from that section and do
+  not return it as a blocking finding unless the current diff or an exact-head
+  failed check independently proves it.
 """
 
 
