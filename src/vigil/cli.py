@@ -263,7 +263,11 @@ def review(
     try:
         conversation_comments = fetch_pr_conversation_comments(owner, repo, pr_number, token)
         conversation_reviews = fetch_all_pr_reviews(owner, repo, pr_number, token)
-        pr_data["conversation"] = build_conversation_context(conversation_comments, conversation_reviews)
+        pr_data["conversation"] = build_conversation_context(
+            conversation_comments,
+            conversation_reviews,
+            head_sha=pr_data["head_sha"],
+        )
         if pr_data["conversation"]:
             console.print(f"[dim]{len(conversation_comments)} conversation comment(s), {len(conversation_reviews)} review(s) fetched for context[/dim]")
     except Exception as e:

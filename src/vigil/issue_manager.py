@@ -11,6 +11,7 @@ import re
 import httpx
 
 from .models import Finding, ReviewResult, Severity
+from .context_manager import stable_finding_key
 from .utils import extract_message_content, github_headers, severity_emoji
 
 log = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ _PRIORITY_LABELS: dict[Severity, tuple[str, str, str]] = {
 
 # Marker in issue body to identify Vigil-created issues
 _VIGIL_ISSUE_MARKER = "<!-- vigil-observation -->"
+_FINDING_KEY_PATTERN = re.compile(r"<!--\s*vigil-finding-key:\s*([a-f0-9]{24})\s*-->")
 
 
 def priority_label_for(finding: Finding) -> str:
@@ -81,6 +83,7 @@ def _build_issue_body(
 
     sections = [
         _VIGIL_ISSUE_MARKER,
+        f"<!-- vigil-finding-key: {stable_finding_key(finding)} -->",
         f"## {emoji} {finding.severity.value.upper()} — {finding.category}\n",
         f"**File:** `{loc}`",
         f"**Reviewer:** {persona}",
@@ -151,12 +154,16 @@ def _match_finding_to_issue(
     finding_text = extract_message_content(finding.message)
     if not finding_text:
         return None
+    finding_key = stable_finding_key(finding)
 
     for issue in issues:
         body = issue.get("body") or ""
         # Must be a Vigil-created issue
         if _VIGIL_ISSUE_MARKER not in body:
             continue
+        key_match = _FINDING_KEY_PATTERN.search(body)
+        if key_match and key_match.group(1) == finding_key:
+            return issue.get("html_url")
         # Check file path match
         if f"`{finding.file}" not in body:
             continue
@@ -283,14 +290,21 @@ def create_issues_for_observations(
                 persona_map[id(obs)] = v.persona
 
     issues: list[tuple[Finding, str]] = []
+    created_by_key: dict[str, str] = {}
     for obs in result.observations:
         persona = persona_map.get(id(obs), "Vigil")
+        finding_key = stable_finding_key(obs)
+
+        if finding_key in created_by_key:
+            issues.append((obs, created_by_key[finding_key]))
+            continue
 
         # Check for existing issue using pre-fetched cache
         existing_url = _match_finding_to_issue(obs, existing_issues)
         if existing_url:
             log.info("Observation already tracked: %s", existing_url)
             issues.append((obs, existing_url))
+            created_by_key[finding_key] = existing_url
             continue
 
         # Create new issue
@@ -301,5 +315,6 @@ def create_issues_for_observations(
         )
         if issue_url:
             issues.append((obs, issue_url))
+            created_by_key[finding_key] = issue_url
 
     return issues
