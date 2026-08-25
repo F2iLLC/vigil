@@ -6,7 +6,9 @@ Tracking issue: [F2iLLC/vigil#77](https://github.com/F2iLLC/vigil/issues/77)
 
 | Milestone | Objective | Dependencies | Status | Exit gate |
 | --- | --- | --- | --- | --- |
-| VFP-01 | Stop stale evidence amplification, deduplicate equivalent findings, and prevent unrelated inline relocation | Vigil `main` including #75 | In progress | Deterministic LunaOS #4761 replay and focused regression suite pass |
+| VFP-01 | Stop stale evidence amplification, deduplicate equivalent findings, and prevent unrelated inline relocation | Vigil `main` including #75 | Completed | Deterministic LunaOS #4761 replay and focused regression suite pass |
+
+Completion evidence: implementation `e1e2cb7`; report `c4f6b69`; 379 focused tests and 819 non-Bash tests passed. The 33 remaining full-suite failures require a usable Bash/WSL and `python3` runtime and are unchanged release/guard tests.
 
 ## Integration constraints
 
