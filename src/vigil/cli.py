@@ -33,13 +33,7 @@ from .github import (
 )
 from .github_review import post_review, react, remove_reaction
 from .issue_manager import create_issues_for_observations
-from .models import (
-    DECISION_NOT_REVIEWED,
-    Finding,
-    PersonaVerdict,
-    ReviewResult,
-    Severity,
-)
+from .models import DECISION_NOT_REVIEWED, Finding, PersonaVerdict, ReviewResult, Severity
 from .personas import PROFILES
 from .reviewer import review_diff
 from .utils import NOT_REVIEWED_ICON, NOT_REVIEWED_LABEL, not_reviewed_reason_text
@@ -566,6 +560,12 @@ def review(
             react(owner, repo, pr_number, token, "+1")
         elif result.decision in ("REQUEST_CHANGES", "BLOCK"):
             react(owner, repo, pr_number, token, "eyes")
+        elif result.decision == DECISION_NOT_REVIEWED:
+            # Without this the rocket is removed and nothing replaces it, so a
+            # completed run that reviewed nothing is indistinguishable — to a
+            # human or to anything watching reactions — from Vigil never
+            # having run at all. That is the #79 defect in a different medium.
+            react(owner, repo, pr_number, token, "confused")
 
 
 @app.command(name="dismiss-resolved")

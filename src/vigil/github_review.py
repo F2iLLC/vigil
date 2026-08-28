@@ -184,7 +184,7 @@ def _build_review_body(
         # goes above it rather than deleting it: a reader who wants the lead's
         # read can still have it, they just cannot mistake it for a review.
         sections.append(
-            "> ⏭️ **No specialist reviewed this diff.** The summary below is a "
+            f"> {NOT_REVIEWED_ICON} **No specialist reviewed this diff.** The summary below is a "
             "single lead-model pass with no specialist review behind it — not a "
             "substitute for one. This verdict does not approve the PR.\n"
         )

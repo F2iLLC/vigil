@@ -168,6 +168,12 @@ SCRIPT_PATTERNS = [
 # every git hook in a clone.
 JS_PATTERNS = ["*.js", "*.jsx", "*.mjs", "*.cjs"]
 
+# TypeScript, all module flavors, for exactly the same reason: `*.ts` does not
+# glob-match `foo.mts` any more than `*.js` matches `foo.mjs`. Caught while
+# reviewing the JS fix above — the identical hole, one language over, and the
+# likelier one to be hit in a TypeScript monorepo.
+TS_PATTERNS = ["*.ts", "*.tsx", "*.mts", "*.cts"]
+
 
 # ---------------------------------------------------------------------------
 # General-purpose specialists
@@ -185,7 +191,7 @@ unhandled promise rejections, infinite loops, incorrect comparisons.
 Do NOT evaluate: style, naming, architecture, security, tests (other reviewers handle those).
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.py", "*.ts", "*.tsx", *JS_PATTERNS, "*.go", "*.rs", "*.java", "*.rb",
+    file_patterns=["*.py", *TS_PATTERNS, *JS_PATTERNS, "*.go", "*.rs", "*.java", "*.rb",
                     *SCRIPT_PATTERNS,
                     "!*.test.*", "!*.spec.*", "!*__test__*", "!*.md", "!*.yml", "!*.yaml",
                     "!*.json", "!*.toml", "!*.lock", "!*.css", "!*.scss"],
@@ -204,7 +210,7 @@ dependency CVEs.
 Do NOT evaluate: style, architecture, general bugs, tests (other reviewers handle those).
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.py", "*.ts", "*.tsx", *JS_PATTERNS, "*.go", "*.rs", "*.java",
+    file_patterns=["*.py", *TS_PATTERNS, *JS_PATTERNS, "*.go", "*.rs", "*.java",
                     "*.env*", "*.yml", "*.yaml", "*.toml", "*.json", "*.lock",
                     *SCRIPT_PATTERNS,
                     "*auth*", "*secret*", "*token*", "*crypto*", "*middleware*",
@@ -225,7 +231,7 @@ resource lifecycle management, config hygiene, naming conventions at the structu
 Do NOT evaluate: individual bugs, security controls, test coverage (other reviewers handle those).
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.py", "*.ts", "*.tsx", *JS_PATTERNS, "*.go", "*.rs", "*.java",
+    file_patterns=["*.py", *TS_PATTERNS, *JS_PATTERNS, "*.go", "*.rs", "*.java",
                     "*.yml", "*.yaml", "*.toml", "*.json",
                     "**/package.json", "**/pyproject.toml", "**/tsconfig*",
                     "!*.test.*", "!*.spec.*", "!*.lock", "!*.css", "!*.scss", "!*.md"],
@@ -249,7 +255,7 @@ Do NOT evaluate: code style, architecture, security (other reviewers handle thos
 {VERDICT_SCHEMA}""",
     file_patterns=["*.test.*", "*.spec.*", "*__test__*", "**/test/**", "**/tests/**",
                     "**/__tests__/**", "**/testing/**", "*conftest*", "*fixture*",
-                    "*.py", "*.ts", "*.tsx", *JS_PATTERNS],
+                    "*.py", *TS_PATTERNS, *JS_PATTERNS],
 )
 
 _PERFORMANCE = Persona(
@@ -273,7 +279,7 @@ Severity guide:
 Do NOT evaluate: correctness/bugs, security, architecture, tests (other reviewers handle those).
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.py", "*.ts", "*.tsx", *JS_PATTERNS, "*.go", "*.rs", "*.java",
+    file_patterns=["*.py", *TS_PATTERNS, *JS_PATTERNS, "*.go", "*.rs", "*.java",
                     "*.sql", "*.graphql", "*.gql",
                     "!*.test.*", "!*.spec.*", "!*.md", "!*.yml", "!*.yaml",
                     "!*.json", "!*.toml", "!*.lock", "!*.css", "!*.scss"],
@@ -304,7 +310,7 @@ Severity guide:
 Do NOT evaluate: correctness/bugs, security, architecture, performance (other reviewers handle those).
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.py", "*.ts", "*.tsx", *JS_PATTERNS, "*.go", "*.rs", "*.java",
+    file_patterns=["*.py", *TS_PATTERNS, *JS_PATTERNS, "*.go", "*.rs", "*.java",
                     "*.md", "*.mdx", "*.rst", "*.txt",
                     "**/package.json", "**/pyproject.toml",
                     "*.yml", "*.yaml", "**/CHANGELOG*", "**/MIGRATION*",
@@ -332,7 +338,7 @@ Your domain:
 Do NOT evaluate: security, GxP compliance, schema design, test coverage, CI signals, commits.
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.ts", "*.tsx", *JS_PATTERNS, "*.py",
+    file_patterns=[*TS_PATTERNS, *JS_PATTERNS, "*.py",
                     *SCRIPT_PATTERNS,
                     "**/package.json", "**/tsconfig*", "**/pyproject.toml",
                     "*.yml", "*.yaml", "*.toml", "*.json", "*.env*",
@@ -358,7 +364,7 @@ Your domain:
 Do NOT evaluate: module boundaries, GxP compliance, schema design, test coverage, CI signals.
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.ts", "*.tsx", *JS_PATTERNS, "*.py",
+    file_patterns=[*TS_PATTERNS, *JS_PATTERNS, "*.py",
                     "*.env*", "*.yml", "*.yaml", "*.toml", "*.json", "*.lock",
                     *SCRIPT_PATTERNS,
                     "*auth*", "*secret*", "*token*", "*crypto*", "*middleware*",
@@ -389,7 +395,7 @@ Do NOT evaluate: module boundaries, security controls, GxP compliance, schema de
 {VERDICT_SCHEMA}""",
     file_patterns=["*.test.*", "*.spec.*", "*__test__*", "**/test/**", "**/tests/**",
                     "**/__tests__/**", "**/testing/**", "*conftest*", "*fixture*",
-                    "*.ts", "*.tsx", *JS_PATTERNS, "*.py"],
+                    *TS_PATTERNS, *JS_PATTERNS, "*.py"],
 )
 
 _ENTERPRISE_DATA = Persona(
@@ -441,7 +447,7 @@ Severity guide:
 Do NOT evaluate: correctness/bugs, security, architecture, schema design, GxP, test coverage.
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.ts", "*.tsx", *JS_PATTERNS, "*.py",
+    file_patterns=[*TS_PATTERNS, *JS_PATTERNS, "*.py",
                     "*.sql", "*.graphql", "*.gql",
                     "!*.test.*", "!*.spec.*", "!*.md", "!*.yml", "!*.yaml",
                     "!*.json", "!*.toml", "!*.lock", "!*.css", "!*.scss"],
@@ -478,7 +484,7 @@ Severity guide:
 Do NOT evaluate: correctness/bugs, security, architecture, performance, GxP, test coverage.
 
 {VERDICT_SCHEMA}""",
-    file_patterns=["*.ts", "*.tsx", *JS_PATTERNS, "*.py",
+    file_patterns=[*TS_PATTERNS, *JS_PATTERNS, "*.py",
                     "*.md", "*.mdx", "*.rst", "*.txt",
                     "**/package.json", "**/pyproject.toml",
                     "*.yml", "*.yaml", "**/CHANGELOG*", "**/MIGRATION*",

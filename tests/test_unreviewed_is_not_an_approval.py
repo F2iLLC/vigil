@@ -38,6 +38,7 @@ the bug:
   review gate that stalls the fleet a different way is not a fix.
 """
 
+import fnmatch
 import json
 from unittest.mock import MagicMock, patch
 
@@ -57,6 +58,7 @@ from vigil.personas import (
     ENTERPRISE_PROFILE,
     JS_PATTERNS,
     SCRIPT_PATTERNS,
+    TS_PATTERNS,
     Persona,
     ReviewProfile,
 )
@@ -319,7 +321,14 @@ class TestScriptFilesAreInScope:
         """The exact reproduction from the issue: one file, scripts/heartbeat-ping.sh."""
         assert _personas_that_would_run(DEFAULT_PROFILE, "scripts/heartbeat-ping.sh")
 
-    @pytest.mark.parametrize("extension", [e.lstrip("*") for e in SCRIPT_PATTERNS])
+    # Deliberately a hardcoded list, NOT derived from SCRIPT_PATTERNS: a test
+    # parametrized over the constant it is checking silently stops checking an
+    # extension the moment someone deletes it from that constant, which is the
+    # one edit this test exists to catch.
+    @pytest.mark.parametrize(
+        "extension",
+        [".sh", ".bash", ".zsh", ".fish", ".ps1", ".psm1", ".bat", ".cmd"],
+    )
     def test_correctness_and_security_both_scope_every_script_extension(self, extension):
         """Not just *a* persona: scripts are where deploy steps, credential
         handling and `curl | sh` live, so both the correctness and the security
@@ -355,11 +364,38 @@ class TestScriptFilesAreInScope:
         assert _scoped_by(security, "scripts/deploy-token.sh")
         assert _scoped_by(security, "scripts/deploy.sh")
 
-    def test_the_pattern_groups_carry_the_extensions_the_issue_named(self):
+    def test_the_pattern_groups_are_actually_wired_into_the_personas(self):
+        """Asserting the constants contain their own literals would pass even if
+        no persona referenced the groups at all. Assert the *effective* patterns
+        of a persona that is supposed to use each group."""
+        logic = _persona_named(DEFAULT_PROFILE, "Logic")
+
         for extension in ("*.sh", "*.bash", "*.zsh", "*.fish", "*.ps1", "*.psm1", "*.bat", "*.cmd"):
-            assert extension in SCRIPT_PATTERNS
+            assert extension in logic.file_patterns, f"{extension} never reached Logic"
         for extension in ("*.js", "*.jsx", "*.mjs", "*.cjs"):
-            assert extension in JS_PATTERNS
+            assert extension in logic.file_patterns, f"{extension} never reached Logic"
+        for extension in ("*.ts", "*.tsx", "*.mts", "*.cts"):
+            assert extension in logic.file_patterns, f"{extension} never reached Logic"
+
+        # And the groups themselves are non-empty, so the assertions above
+        # cannot be satisfied by a persona that hardcodes the literals.
+        assert SCRIPT_PATTERNS and JS_PATTERNS and TS_PATTERNS
+
+    def test_mts_and_cts_are_scoped_wherever_plain_ts_is(self):
+        """`*.ts` does not glob-match `foo.mts`, exactly as `*.js` does not match
+        `foo.mjs`. Found while reviewing the JS half of this fix — the same hole,
+        one language over, and the likelier one in a TypeScript monorepo."""
+        assert fnmatch.fnmatch("src/a.mts", "*.ts") is False
+        assert fnmatch.fnmatch("src/a.cts", "*.ts") is False
+
+        for profile in (DEFAULT_PROFILE, ENTERPRISE_PROFILE):
+            for persona in profile.specialists:
+                if not _scoped_by(persona, "src/app.ts"):
+                    continue
+                for path in ("src/app.mts", "src/app.cts"):
+                    assert _scoped_by(persona, path), (
+                        f"{persona.name} in the {profile.name} profile scopes .ts but not {path}"
+                    )
 
 
 # ---------- boundaries that must not move ----------
@@ -415,10 +451,90 @@ class TestGatingBoundariesHold:
         assert result.specialist_verdicts == []
         assert result.decision == "APPROVE"
 
-    def test_individual_skipped_verdicts_keep_their_approve_decision(self):
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer._call_llm_with_retry")
+    def test_individual_skipped_verdicts_keep_their_approve_decision(self, mock_llm, mock_alerts):
         """#66 pinned this: the per-persona decision is what keeps a skipped
-        domain from blocking. Only the aggregate changed."""
-        assert _not_reviewed().decision == "APPROVE"
+        domain from blocking. Only the aggregate changed.
+
+        Asserted against a verdict **production actually built**, not against
+        this module's `_not_reviewed()` helper — that helper hardcodes
+        `decision="APPROVE"`, so asserting on it would be checking the fixture
+        against itself and would pass with the whole fix reverted.
+        """
+        mock_alerts.return_value = 0
+        mock_llm.side_effect = [_specialist_response(), _lead_response()]
+
+        profile = _profile(
+            Persona(name="Logic", focus="Bugs", system_prompt="p", file_patterns=["*.py"]),
+            Persona(name="Frontend", focus="UI", system_prompt="p", file_patterns=["*.tsx"]),
+        )
+        result = review_diff(_diff("src/app.py"), _pr_context(), profile)
+
+        skipped = [v for v in result.specialist_verdicts if not v.reviewed]
+        assert len(skipped) == 1
+        assert skipped[0].decision == "APPROVE"
+        assert is_blocking_decision(skipped[0].decision) is False
+
+
+class TestKnownCoverageGapsAreDeliberate:
+    """The file shapes that still reach the NOT_REVIEWED branch.
+
+    This test does not assert that the gap is *good*. It asserts that the gap
+    is *known*, so that changing it is a deliberate act with a visible diff
+    rather than an accident — the same failure mode that produced #79, where
+    nobody could see which extensions no persona scoped.
+
+    It matters because `NOT_REVIEWED` is non-blocking but also non-approving,
+    and in a repo whose ruleset requires an approval that Vigil is the one
+    supplying, "no approval" stops the merge just as effectively as a block —
+    and unlike a block it is deterministic: re-running Vigil produces the same
+    verdict forever, with no automated way out. Every path below therefore
+    needs a human approval today.
+
+    Whether that is the right trade is an owner decision, recorded on #79 and
+    in the CHANGELOG rather than silently settled here. The two options on the
+    table are broadening these personas' patterns, or adding a catch-all
+    specialist so the NOT_REVIEWED branch becomes a true last resort. Until
+    one is chosen, this list is the honest statement of the cost.
+    """
+
+    # Verified against the real profiles, not asserted from memory.
+    UNCOVERED = [
+        "styles/main.css", "styles/main.scss",     # deliberately excluded everywhere (!*.css)
+        "Dockerfile", "Makefile",                  # no extension to match on
+        "scripts/deploy",                          # extensionless shell script
+        "infra/main.tf",                           # Terraform
+        ".gitignore", "CODEOWNERS", "LICENSE",     # repo-root convention files
+        "src/app.vue", "index.html",               # web templates
+        "src/main.c", "src/App.kt",                # languages no persona lists
+        "data.csv",
+    ]
+
+    @pytest.mark.parametrize("path", UNCOVERED)
+    def test_these_shapes_reach_no_specialist_in_either_profile(self, path):
+        assert not _personas_that_would_run(DEFAULT_PROFILE, path)
+        assert not _personas_that_would_run(ENTERPRISE_PROFILE, path)
+
+    @pytest.mark.parametrize("path", UNCOVERED)
+    def test_and_therefore_produce_a_non_approving_verdict(self, path):
+        """The consequence, stated once rather than left to be discovered:
+        a PR touching only one of these gets no approval from Vigil."""
+        hunks = parse_diff(_diff(path))
+        for profile in (DEFAULT_PROFILE, ENTERPRISE_PROFILE):
+            would_run = [
+                p for p in profile.specialists
+                if not p.requires_external_context
+                and (not p.file_patterns or filter_hunks(hunks, p.file_patterns))
+            ]
+            assert would_run == []
+
+    def test_the_shapes_this_pr_did_fix_are_not_in_that_list(self):
+        """Guards against the list quietly growing to cover a regression."""
+        for path in ("scripts/heartbeat-ping.sh", "scripts/setup-git-hooks.mjs",
+                     "src/app.mts", "src/legacy.cjs", "README.md"):
+            assert path not in self.UNCOVERED
+            assert _personas_that_would_run(DEFAULT_PROFILE, path)
 
 
 class TestDocumentationOnlyPathIsUnaffected:
