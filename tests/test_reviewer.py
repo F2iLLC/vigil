@@ -5,7 +5,14 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from vigil.external_context import ExternalContext
-from vigil.models import Finding, PersonaVerdict, ReviewResult, Severity
+from vigil.github_review import is_blocking_decision
+from vigil.models import (
+    DECISION_NOT_REVIEWED,
+    Finding,
+    PersonaVerdict,
+    ReviewResult,
+    Severity,
+)
 from vigil.personas import Persona, ReviewProfile
 from vigil.reviewer import (
     _build_pr_context_block,
@@ -470,7 +477,19 @@ class TestTransientSpecialistErrors:
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer._call_llm_with_retry")
     def test_503_does_not_block_overall_review(self, mock_llm, mock_alerts):
-        """A 503 specialist error should not cause the overall review to REQUEST_CHANGES."""
+        """A 503 specialist error should not cause the overall review to REQUEST_CHANGES.
+
+        The invariant this test exists to protect is asserted directly below and
+        is unchanged: a transient provider error must never turn into a merge
+        block. Vigil does not blame the author for its own outage.
+
+        What changed in #79 is the other half. This profile has exactly one
+        specialist, so a 503 there means *nothing was examined* — and the
+        aggregate used to come back APPROVE, which satisfied a required-approval
+        rule. Approving through an outage is a textbook fail-open, so the
+        verdict is now NOT_REVIEWED: still non-blocking, but no longer an
+        approval. A partial outage, where some specialist did run, is untouched.
+        """
         mock_alerts.return_value = 0
         lead_json = json.dumps({"decision": "APPROVE", "summary": "Looks good", "findings": []})
         lead_resp = MagicMock()
@@ -480,7 +499,8 @@ class TestTransientSpecialistErrors:
         profile = self._make_profile()
         result = review_diff("diff --git a/a.py b/a.py\n", self._pr_context(), profile)
 
-        assert result.decision == "APPROVE"
+        assert result.decision == DECISION_NOT_REVIEWED
+        assert is_blocking_decision(result.decision) is False
         assert len(result.lead_findings) == 0
 
     @patch("vigil.reviewer.send_alerts_for_verdicts")

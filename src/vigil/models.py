@@ -43,6 +43,31 @@ SKIP_REVIEWER_UNAVAILABLE = "reviewer_unavailable"
 SKIP_NO_EXTERNAL_CONTEXT = "no_external_context"
 
 
+# ---------- Aggregate review decisions ----------
+
+# The verdicts that actually block a merge. Lives here rather than in
+# github_review so the review engine and the posting layer read one definition
+# (F2iLLC/vigil#79); ``github_review`` re-exports the name it has always
+# exported.
+BLOCKING_DECISIONS = frozenset({"REQUEST_CHANGES", "BLOCK"})
+
+# The aggregate decision for a review in which NO specialist ran (#79).
+#
+# It is deliberately neither APPROVE nor a blocking verdict. A review where
+# every specialist was skipped is not an approval — it is the absence of one —
+# and emitting APPROVE there satisfied the org ruleset's required-approval rule,
+# so a PR touching only unscoped files merged with zero review
+# (F2iLLC/LunaOS#5028). It is equally not REQUEST_CHANGES: nothing was examined,
+# so there is nothing to object to, and blocking would fail closed on every
+# diff no persona happens to scope.
+#
+# It maps to a GitHub COMMENT event, which is the exact semantics wanted:
+# the review still posts and still says everything it has to say, but it does
+# not count as an approval toward a required-approval rule. This closes the
+# whole class — including the next file extension nobody thought to add.
+DECISION_NOT_REVIEWED = "NOT_REVIEWED"
+
+
 class PersonaVerdict(BaseModel):
     """One specialist reviewer's structured verdict.
 

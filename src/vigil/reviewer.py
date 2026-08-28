@@ -12,6 +12,8 @@ from .alerts import send_alerts_for_verdicts
 from .diff_parser import diff_summary, filter_hunks, parse_diff, reassemble_diff
 from .external_context import ExternalContext, fetch_external_context
 from .models import (
+    BLOCKING_DECISIONS,
+    DECISION_NOT_REVIEWED,
     SKIP_NO_EXTERNAL_CONTEXT,
     SKIP_NO_FILES_IN_SCOPE,
     SKIP_REVIEWER_UNAVAILABLE,
@@ -661,6 +663,38 @@ def review_diff(
     decision, summary, lead_findings = _run_lead_review(
         profile.lead_prompt, lead_pr_block, verdicts, lead_model
     )
+
+    # --- Step 2.5: A review where no specialist ran is not an approval (#79) ---
+    #
+    # #66 made a skipped specialist *say* it was skipped. It deliberately left
+    # gating alone, which is right for a partial skip: when some specialists
+    # ran, the ones with nothing in their domain must not block the merge.
+    #
+    # The case #66 left open is the total one. When EVERY specialist is skipped,
+    # the aggregate APPROVE is not "seven domains checked, none objected" — it
+    # is "nothing was checked", and it satisfied a required-approval rule all
+    # the same. A PR whose only file was `scripts/heartbeat-ping.sh` merged with
+    # zero review that way (F2iLLC/LunaOS#5028), because no persona's
+    # file_patterns scoped shell at all.
+    #
+    # Downgrading to NOT_REVIEWED (a COMMENT event) is the categorical fix:
+    # it holds for any file type no persona happens to scope, including ones
+    # nobody has thought of yet, so it does not depend on the extension list
+    # below it staying complete.
+    #
+    # Two boundaries this must not cross:
+    #   * A blocking lead verdict is never downgraded. The lead reads the full
+    #     diff, so it can object even when no specialist ran, and turning that
+    #     REQUEST_CHANGES into a non-blocking COMMENT would fail open — the
+    #     exact defect being fixed, pointed the other way.
+    #   * A partial skip is untouched. Any specialist having run means the
+    #     verdict is a real one; only a total skip is an absence of review.
+    if (
+        verdicts
+        and not any(v.reviewed for v in verdicts)
+        and decision not in BLOCKING_DECISIONS
+    ):
+        decision = DECISION_NOT_REVIEWED
 
     # --- Step 3.5: Cross-specialist deduplication ---
     # When multiple specialists flag the same issue at the same location,

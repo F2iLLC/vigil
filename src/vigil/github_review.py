@@ -17,7 +17,14 @@ from .finding_validation import (
     SuppressedFinding,
     validate_findings_against_head,
 )
-from .models import Finding, PersonaVerdict, ReviewResult, Severity
+from .models import (
+    BLOCKING_DECISIONS,
+    DECISION_NOT_REVIEWED,
+    Finding,
+    PersonaVerdict,
+    ReviewResult,
+    Severity,
+)
 from .utils import (
     NOT_REVIEWED_ICON,
     embed_json_metadata,
@@ -33,7 +40,10 @@ log = logging.getLogger(__name__)
 # threads (issue #52): GitHub renders every inline comment as an unresolved
 # thread, so any other verdict — APPROVE above all — must keep its findings in
 # the review body or it blocks its own PR under a resolve-all-threads ruleset.
-BLOCKING_DECISIONS = frozenset({"REQUEST_CHANGES", "BLOCK"})
+#
+# The set itself moved to models.py in #79 so the review engine and this
+# posting layer read one definition. It is imported above, which keeps
+# `from vigil.github_review import BLOCKING_DECISIONS` working unchanged.
 
 
 # Machine-readable marker naming the specialists that never ran, appended to
@@ -138,7 +148,14 @@ def _build_review_body(
     any_reviewed = any(v.reviewed for v in result.specialist_verdicts)
 
     # Header
-    decision_emoji = {"APPROVE": "\u2705", "REQUEST_CHANGES": "\u274c", "BLOCK": "\U0001f6ab"}
+    decision_emoji = {
+        "APPROVE": "\u2705",
+        "REQUEST_CHANGES": "\u274c",
+        "BLOCK": "\U0001f6ab",
+        # Never a check-mark: this verdict's whole point is that nothing was
+        # reviewed. It reuses the skip marker the specialist rows use (#79).
+        DECISION_NOT_REVIEWED: NOT_REVIEWED_ICON,
+    }
     emoji = decision_emoji.get(result.decision, "\u2753")
     sections.append(f"## {emoji} Vigil Review: **{result.decision}**\n")
     if result.commit_sha:
@@ -157,6 +174,20 @@ def _build_review_body(
             # specialists are configured at all: nothing was skipped there, so
             # there is no false green to correct.
             sections.append(f"*Reviewed commit `{short_sha}` with `{result.model}`*\n")
+    if not_run and not any_reviewed and result.summary:
+        # The lead does see the full diff, so this summary is not invented —
+        # but it is one generalist pass with no domain review behind it, and
+        # it is written to read as a synthesis of specialist verdicts that in
+        # this case do not exist. On F2iLLC/LunaOS#5028 it produced a fluent
+        # paragraph ("well-scoped, follows existing project idioms") that a
+        # human skimming the review had no way to discount (#79). The caveat
+        # goes above it rather than deleting it: a reader who wants the lead's
+        # read can still have it, they just cannot mistake it for a review.
+        sections.append(
+            "> ⏭️ **No specialist reviewed this diff.** The summary below is a "
+            "single lead-model pass with no specialist review behind it — not a "
+            "substitute for one. This verdict does not approve the PR.\n"
+        )
     sections.append(f"{result.summary}\n")
 
     # Specialist verdicts summary
@@ -723,6 +754,12 @@ def post_review(
         "APPROVE": "APPROVE",
         "REQUEST_CHANGES": "REQUEST_CHANGES",
         "BLOCK": "REQUEST_CHANGES",  # GitHub has no BLOCK event
+        # Posts, but approves nothing. A COMMENT review does not satisfy a
+        # required-approval rule and does not block the merge either, which is
+        # exactly right for "no specialist examined this" (#79). Stated
+        # explicitly rather than left to the default below, so a future edit to
+        # that default cannot silently turn this back into an approval.
+        DECISION_NOT_REVIEWED: "COMMENT",
     }
     event = event_map.get(result.decision, "COMMENT")
     if deblocked_stale_only:

@@ -33,7 +33,13 @@ from .github import (
 )
 from .github_review import post_review, react, remove_reaction
 from .issue_manager import create_issues_for_observations
-from .models import Finding, PersonaVerdict, ReviewResult, Severity
+from .models import (
+    DECISION_NOT_REVIEWED,
+    Finding,
+    PersonaVerdict,
+    ReviewResult,
+    Severity,
+)
 from .personas import PROFILES
 from .reviewer import review_diff
 from .utils import NOT_REVIEWED_ICON, NOT_REVIEWED_LABEL, not_reviewed_reason_text
@@ -54,6 +60,9 @@ DECISION_COLORS = {
     "REQUEST_CHANGES": "red",
     "BLOCK": "bold red",
     "ERROR": "magenta",
+    # Never green: no specialist examined the diff, so the operator watching
+    # this panel must not read it as a pass (#79).
+    DECISION_NOT_REVIEWED: "yellow",
 }
 
 
