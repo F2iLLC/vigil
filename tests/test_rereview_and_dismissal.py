@@ -41,7 +41,7 @@ from vigil.comment_manager import (
     _dismiss_review,
 )
 from vigil.github_review import post_review
-from vigil.models import ReviewResult
+from vigil.models import DECISION_NOT_REVIEWED, ReviewResult
 
 
 SHA_A = "5e2c671" + "a" * 33
@@ -1388,3 +1388,66 @@ class TestWebhookForcesOnDemandReviews:
         })
         assert args is not None, "no review was dispatched"
         assert args[4] is False, "an ordinary PR event must not be forced"
+
+
+class TestNotReviewedNeverRunsApprovalOnlyCleanup:
+    """#79's `NOT_REVIEWED` verdict must not reach the approval-only cleanup.
+
+    `cli.review` performs two cleanups when a review concludes APPROVE: it
+    dismisses Vigil's own stale blocking reviews (#48) and resolves Vigil's
+    still-open threads (#61). Both are gated on the verdict being APPROVE *and*
+    on GitHub having accepted it as an `APPROVE` event.
+
+    `NOT_REVIEWED` means no specialist examined the diff, so it must trip
+    neither. Clearing a standing block, or resolving the threads that carry the
+    visible findings, on the strength of a review that examined nothing would
+    reproduce #79's fail-open in the two places it does the most damage — and
+    both of those doors have been left open before, which is why #48 and #61
+    exist. Safe by inspection at the `result.decision == "APPROVE"` guard, but
+    inspection is not a regression test.
+    """
+
+    def test_it_dismisses_no_blocks_and_resolves_no_threads(self, monkeypatch):
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"],
+            decision=DECISION_NOT_REVIEWED,
+            threads=[vigil_thread("T-a", "file_a.py")],
+        )
+
+        run_review()
+
+        assert rec.posted == [DECISION_NOT_REVIEWED]
+        assert rec.dismissals == [], "a review that examined nothing dismissed a standing block"
+        assert rec.resolved_thread_ids == [], "a review that examined nothing resolved a thread"
+
+    def test_the_standing_block_survives_the_run(self, monkeypatch):
+        """The end state a human sees: the prior CHANGES_REQUESTED is still live."""
+        reviews = [vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")]
+        wire_review(
+            monkeypatch,
+            reviews=reviews,
+            changed_files=["file_b.py"],
+            decision=DECISION_NOT_REVIEWED,
+            threads=[vigil_thread("T-a", "file_a.py")],
+        )
+
+        run_review()
+
+        assert reviews[0]["state"] == "CHANGES_REQUESTED"
+
+    def test_an_approve_still_does_both(self, monkeypatch):
+        """Control: the cleanup is gated on the verdict, not broken outright."""
+        rec = wire_review(
+            monkeypatch,
+            reviews=[vigil_review(1, "CHANGES_REQUESTED", SHA_A, "2026-08-01T00:00:00Z")],
+            changed_files=["file_b.py"],
+            decision="APPROVE",
+            threads=[vigil_thread("T-a", "file_a.py")],
+        )
+
+        run_review()
+
+        assert rec.dismissals != []
+        assert rec.resolved_thread_ids == ["T-a"]
