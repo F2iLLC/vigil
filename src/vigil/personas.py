@@ -6,6 +6,95 @@ Ships with "default" (general-purpose) and "enterprise" (regulated/medtech).
 
 from dataclasses import dataclass, field
 
+# The machine-readable evidence a finding must carry to be checkable at head.
+#
+# These four names are contract, not prose: ``finding_validation`` matches on
+# them, and every provenance-based suppression it can perform is gated on
+# ``evidence_source`` holding one of the structured values below. A finding
+# that omits them parses as ``evidence_source="unknown"`` with an empty
+# ``predicate``, which is the legacy fail-open value — it travels through the
+# whole #74/#77 control path untouched.
+#
+# They are declared once, here, because the schema used to be written out
+# separately in each prompt and the lead's copy silently lacked all four
+# (F2iLLC/vigil#81). The lead is the one reviewer whose finding can block a PR
+# with no specialist agreement, so it was exactly the wrong reviewer to exempt
+# from validation. ``tests/test_lead_finding_evidence.py`` pins the parity so
+# the two cannot drift apart again.
+FINDING_EVIDENCE_FIELDS = (
+    "component",
+    "predicate",
+    "evidence_source",
+    "evidence_commit",
+)
+
+_EVIDENCE_SCHEMA_LINES = """      "component": "stable affected package/module/service name",
+      "predicate": "short stable defect statement independent of wording",
+      "evidence_source": "current_diff | current_check | historical_conversation | external_context | unknown",
+      "evidence_commit": "the supporting commit SHA, or empty string\""""
+
+_EVIDENCE_PLACEHOLDER = "__FINDING_EVIDENCE_FIELDS__"
+
+_LEAD_SUBSTANTIATION_PLACEHOLDER = "__LEAD_BLOCK_SUBSTANTIATION__"
+
+# Only the lead can block a PR that no specialist objected to, so only the lead
+# needs this. On F2iLLC/LunaOS#5082 it spent a BLOCK on a documentation table
+# that already said, in four places, exactly what the block asked it to say
+# (F2iLLC/vigil#81).
+_LEAD_BLOCK_SUBSTANTIATION = """SUBSTANTIATING A VERDICT NO SPECIALIST SUPPORTS — READ BEFORE DECIDING:
+- Your verdict is published directly above the specialist table. A reader who
+  sees "1/7 approved, 0 rejections" under a BLOCK has to reconcile two
+  statements that disagree, and on F2iLLC/LunaOS#5082 it was the BLOCK that
+  was wrong (F2iLLC/vigil#81).
+- Vigil CANNOT withdraw its own changes-request. A wrong block costs a human
+  two manual actions — dismiss the review AND resolve the thread — and stalls
+  the PR until they take them. A block is expensive and irreversible; an
+  approval you later revise on a new head is neither.
+- You may still block with no specialist behind you. But only on something you
+  can point at: name the file and line AT THE REVIEWED HEAD that proves it,
+  set "evidence_source" to "current_diff", set "evidence_commit" to the
+  reviewed commit SHA, and write "predicate" as a statement that is plainly
+  true or false at that head — not a risk that something "may cause
+  confusion", "could be misread", or "creates a risk of misinterpretation".
+- Read the whole cited region before calling it inconsistent. A qualifier,
+  scope note, or status line elsewhere in the same file may already say what
+  you are about to ask for. If the change you would request is already present
+  at head, there is no finding.
+- If the concern is real but not provable at head, it belongs in your summary,
+  not in a blocking finding. Do not spend a block on it."""
+
+
+def _with_evidence_fields(schema: str) -> str:
+    """Splice the shared evidence fields into one prompt's finding schema.
+
+    Raises rather than returning the schema unchanged. A prompt that quietly
+    shipped without these fields is the #81 defect itself: its findings would
+    still parse, still post, and still block, while silently bypassing every
+    head-validation stage. A missing placeholder must be a startup failure,
+    not a review that fails open.
+    """
+    if _EVIDENCE_PLACEHOLDER not in schema:
+        raise ValueError(
+            f"prompt schema is missing {_EVIDENCE_PLACEHOLDER!r}: every finding "
+            "schema must request the evidence fields, or its findings bypass "
+            "head validation (F2iLLC/vigil#81)"
+        )
+    return schema.replace(_EVIDENCE_PLACEHOLDER, _EVIDENCE_SCHEMA_LINES)
+
+
+def _finalize_lead_prompt(prompt: str) -> str:
+    """A lead prompt needs the evidence fields *and* the substantiation rules."""
+    if _LEAD_SUBSTANTIATION_PLACEHOLDER not in prompt:
+        raise ValueError(
+            f"lead prompt is missing {_LEAD_SUBSTANTIATION_PLACEHOLDER!r}: the "
+            "lead is the only reviewer that can block with no specialist "
+            "behind it (F2iLLC/vigil#81)"
+        )
+    return _with_evidence_fields(prompt).replace(
+        _LEAD_SUBSTANTIATION_PLACEHOLDER, _LEAD_BLOCK_SUBSTANTIATION,
+    )
+
+
 VERDICT_SCHEMA = """
 Respond with valid JSON matching this schema:
 {
@@ -19,10 +108,7 @@ Respond with valid JSON matching this schema:
       "category": "string",
       "message": "string",
       "suggestion": "string or null",
-      "component": "stable affected package/module/service name",
-      "predicate": "short stable defect statement independent of wording",
-      "evidence_source": "current_diff | current_check | historical_conversation | external_context | unknown",
-      "evidence_commit": "the supporting commit SHA, or empty string"
+__FINDING_EVIDENCE_FIELDS__
     }
   ],
   "observations": [
@@ -91,6 +177,8 @@ FACTUAL CLAIMS VS. THREAD EVIDENCE:
   not return it as a blocking finding unless the current diff or an exact-head
   failed check independently proves it.
 """
+
+VERDICT_SCHEMA = _with_evidence_fields(VERDICT_SCHEMA)
 
 
 @dataclass
@@ -557,11 +645,15 @@ If two specialists' findings create contradictory requirements, apply this proce
 When a specialist's finding touches another specialist's domain, the lead routes
 the constraint — specialists do not dictate solutions across domain boundaries.
 
+__LEAD_BLOCK_SUBSTANTIATION__
+
 Decision rules:
 - If ANY specialist returned REQUEST_CHANGES with critical/high findings -> REQUEST_CHANGES
 - If all specialists APPROVE and you find no blocking issues -> APPROVE
 - If you find a fundamental issue (architectural violation, plan misalignment) -> BLOCK
 - Every BLOCK must include a recommendation for resolution. Never just block.
+- A specialist that did NOT run has approved nothing. It is not agreement with
+  you and it is not agreement against you — its domain is simply unexamined.
 
 Respond with valid JSON:
 {
@@ -574,7 +666,8 @@ Respond with valid JSON:
       "severity": "critical | high | medium | low",
       "category": "scope | conventions | coherence | conflict",
       "message": "string",
-      "suggestion": "string or null"
+      "suggestion": "string or null",
+__FINDING_EVIDENCE_FIELDS__
     }
   ]
 }"""
@@ -620,10 +713,14 @@ If two specialists' findings create contradictory requirements, apply this proce
 Specialists own their domains. When a finding crosses domain boundaries, route
 the constraint — no specialist dictates solutions in another's domain.
 
+__LEAD_BLOCK_SUBSTANTIATION__
+
 Decision rules:
 - If ANY specialist returned REQUEST_CHANGES -> consolidate issues -> REQUEST_CHANGES
 - If all pass and you find no blocking issues -> APPROVE
 - If fundamental issue (architectural violation, security concern, plan misalignment) -> BLOCK
+- A specialist that did NOT run has approved nothing. It is not agreement with
+  you and it is not agreement against you — its domain is simply unexamined.
 
 Every BLOCK must include a recommendation for resolution. Never just block.
 Be specific, file-level, actionable. Never vague.
@@ -639,10 +736,19 @@ Respond with valid JSON:
       "severity": "critical | high | medium | low",
       "category": "scope | conventions | regression | clarity | conflict",
       "message": "string",
-      "suggestion": "string or null"
+      "suggestion": "string or null",
+__FINDING_EVIDENCE_FIELDS__
     }
   ]
 }"""
+
+# Both lead prompts get the same evidence schema the specialists get, and the
+# same substantiation rules. Spliced from one source rather than written out
+# twice: the lead's copy of the finding schema silently lacked all four
+# evidence fields, so every lead finding parsed as ``evidence_source="unknown"``
+# and travelled through ``finding_validation`` unvalidated (F2iLLC/vigil#81).
+_DEFAULT_LEAD_PROMPT = _finalize_lead_prompt(_DEFAULT_LEAD_PROMPT)
+_ENTERPRISE_LEAD_PROMPT = _finalize_lead_prompt(_ENTERPRISE_LEAD_PROMPT)
 
 # ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
