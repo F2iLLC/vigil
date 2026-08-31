@@ -1,17 +1,49 @@
-# Detect release-pin drift (issue #58). REPORT ONLY — never mutates a tag.
+# Detect release-pin drift (issues #58, #82). REPORT ONLY — never mutates a tag.
 #
 # The release decision is the owner's, so this workflow does not ship anything.
 # What it removes is the *silence*: the drift in issue #58 was found four times
 # by a human reading SHAs by hand, and each time it had already been live for
-# hours. A scheduled check turns that into a signal that arrives on its own.
+# hours.
 #
-# It watches BOTH stale surfaces the issue identifies, because fixing only the
-# first leaves the second rotting:
-#   1. the `v1` alias tag vs `main`
-#   2. the `F2iLLC/vigil@<sha>` self-pins inside .github/workflows/
+# WHAT WENT WRONG WITH THE FIRST VERSION OF THIS FILE (#82)
+# ---------------------------------------------------------
+# It ran 26 times between 2026-08-12 and 2026-08-30 and failed 26 times, and it
+# never once reported a drift. Two independent defects, both fixed here:
 #
-# It does not run on `pull_request`, so it can never block a PR — and it is
-# expected to be RED right now, because the drift it reports is real.
+#  1. IT WAS MUTE. GitHub's default `run` shell is
+#     `bash --noprofile --norc -e -o pipefail {0}`. A step body that opens with
+#     `set -uo pipefail` does NOT clear that inherited `-e`, so
+#
+#         out="$(bash .github/scripts/tagctl.sh drift ...)"; rc=$?
+#
+#     killed the step the instant `tagctl.sh` exited non-zero — which is
+#     precisely and only the case the reporting code underneath was written to
+#     handle. Every drift branch was unreachable; a drifted run produced a bare
+#     `Process completed with exit code 3` and nothing else. The steps now
+#     declare `shell: bash {0}` and also guard the substitution with `|| rc=$?`,
+#     so neither the flag nor the guard is load-bearing alone.
+#
+#  2. IT WAS PERMANENTLY RED, SO IT CARRIED NO SIGNAL. One job covered both
+#     surfaces. A `F2iLLC/vigil@<sha>` self-pin goes stale the moment any commit
+#     lands after it is bumped, so that surface is red in the steady state — and
+#     it masked the alias surface completely. The check was red from the day it
+#     was created, which is why the 21-hour #79/#80 drift was indistinguishable
+#     from background noise. The two surfaces are now independent jobs, so
+#     `v1 alias vs main` is genuinely green when the fleet is current.
+#
+# WHY IT ALSO FILES AN ISSUE
+# --------------------------
+# A red scheduled workflow is demonstrably not enough: 26 of them were ignored.
+# #82's actual complaint is that the drift is invisible *in the issue tracker* —
+# each recurrence left a CLOSED defect still live across five repos, so anyone
+# asking "is #79 fixed?" got "yes" while the vulnerable reviewer was still
+# gating every PR in the fleet. So drift also opens a single deduplicated
+# tracking issue, refreshes it while the gap persists, and closes it by itself
+# once the alias catches up.
+#
+# The tracker deliberately watches ONLY the `v1` alias. The self-pins are stale
+# by construction between bumps; tracking them here would leave an issue open
+# permanently and recreate the exact saturation this file is fixing.
 
 name: Tag drift check
 
@@ -32,9 +64,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  drift:
-    name: v1 alias and self-pins vs main
+  # ==========================================================================
+  # Surface 1: the consumer-facing alias. This is the one that decides whether
+  # merged fixes are actually running in the fleet, and it must be able to go
+  # green — see defect 2 in the header.
+  # ==========================================================================
+  alias:
+    name: v1 alias vs main
     runs-on: ${{ fromJSON(vars.VIGIL_RUNNER_JSON || '["ubuntu-latest"]') }}
+    permissions:
+      contents: read
+      # For the tracking issue. This job cannot write code or tags; the only
+      # mutation it is capable of is opening, editing and closing one issue.
+      issues: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -54,10 +96,24 @@ jobs:
 
       - name: Check the v1 alias against main
         id: alias
+        # NOT the default shell: this step handles a non-zero exit itself, and
+        # the default `-e` would abort it before it could report. See defect 1.
+        shell: bash {0}
         run: |
           set -uo pipefail
-          out="$(bash .github/scripts/tagctl.sh drift --alias v1 --branch origin/main)"; rc=$?
+
+          rc=0
+          out="$(bash .github/scripts/tagctl.sh drift --alias v1 --branch origin/main)" || rc=$?
           printf '%s\n' "$out"
+
+          # `tagctl.sh drift` peels the alias for us — `resolve()` applies
+          # `^{commit}`, so this is the dereferenced comparison and not the
+          # `git rev-parse v1` form that reports phantom drift against an
+          # annotated tag. `v1` is lightweight today and was annotated as
+          # recently as 2026-08-28, so the peel has to stay unconditional.
+          count="$(printf '%s\n' "$out" | sed -n 's/^drift_count=//p')"
+          unshipped="$(printf '%s\n' "$out" \
+            | sed -n '/^unshipped<<EOF_UNSHIPPED$/,/^EOF_UNSHIPPED$/p' | sed '1d;$d')"
 
           {
             echo "## Release pin drift"
@@ -72,30 +128,141 @@ jobs:
             echo "::error::the v1 alias tag does not exist"
             echo "\`v1\` is **missing**." >> "$GITHUB_STEP_SUMMARY"
           else
-            count="$(printf '%s\n' "$out" | sed -n 's/^drift_count=//p')"
             echo "::warning::v1 is ${count} commit(s) behind main — merged fixes are not reaching consumers"
             {
               echo "\`v1\` is **${count} commit(s) behind \`main\`**. Every consumer"
               echo "pinning \`F2iLLC/vigil@v1\` is running without these:"
               echo ""
               echo '```'
-              printf '%s\n' "$out" | sed -n '/^unshipped<<EOF_UNSHIPPED$/,/^EOF_UNSHIPPED$/p' \
-                | sed '1d;$d'
+              printf '%s\n' "$unshipped"
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
-          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "rc=$rc"
+            echo "count=${count:-0}"
+          } >> "$GITHUB_OUTPUT"
+
+          # Hand the commit list to the tracking step as a file. A multiline
+          # step output would have to be delimiter-escaped, and a commit
+          # subject containing the delimiter would corrupt the run.
+          printf '%s\n' "$unshipped" > unshipped.txt
+
+      - name: Track the drift in the issue tracker
+        id: track
+        shell: bash {0}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC: ${{ steps.alias.outputs.rc }}
+          COUNT: ${{ steps.alias.outputs.count }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+
+          # One fixed title is the whole dedupe key. Searching by body marker
+          # would depend on GitHub's search index, which lags by minutes and
+          # would let a scheduled run open a second copy.
+          TITLE="Release drift: the v1 alias is behind main"
+
+          existing="$(gh issue list --state open --limit 200 \
+                        --json number,title --jq '.[] | [.number, .title] | @tsv' \
+                      | awk -F'\t' -v t="$TITLE" '$2 == t { print $1; exit }')"
+
+          if [ "$RC" = "0" ]; then
+            if [ -n "$existing" ]; then
+              gh issue comment "$existing" --body \
+                "\`v1\` is back in sync with \`main\`. Closing automatically — [run](${RUN_URL})."
+              gh issue close "$existing"
+              echo "closed #$existing"
+            else
+              echo "in sync, nothing tracked"
+            fi
+            exit 0
+          fi
+
+          {
+            echo "\`v1\` is what every consumer pins (\`uses: F2iLLC/vigil@v1\`), so"
+            echo "**merging is not shipping**. It is currently **${COUNT} commit(s) behind**"
+            echo "\`main\`, which means these merged fixes are not running anywhere in"
+            echo "the fleet:"
+            echo ""
+            echo '```'
+            cat unshipped.txt
+            echo '```'
+            echo ""
+            echo "This is the failure mode issue #82 records: the defects above are"
+            echo "**closed on the tracker while still live in every repo**, so asking"
+            echo "\"is it fixed?\" gives the wrong answer. This issue exists so that"
+            echo "gap is visible where people actually look."
+            echo ""
+            echo "### To clear it"
+            echo ""
+            echo "Moving \`v1\` is a fleet-wide release and belongs to the repository"
+            echo "owner — no automation here will do it. Run the **Release (move major"
+            echo "alias tag)** workflow (or push a \`vX.Y.Z\` tag) and approve the"
+            echo "\`release\` deployment."
+            echo ""
+            echo "### To verify by hand"
+            echo ""
+            echo "Dereference, always — against an annotated \`v1\` the undereferenced"
+            echo "form reports drift unconditionally and is a permanent false alarm:"
+            echo ""
+            echo '```bash'
+            echo "[ \"\$(git rev-parse 'v1^{commit}')\" = \"\$(git rev-parse origin/main)\" ] \\"
+            echo "  && echo 'v1 is current' || echo 'v1 BEHIND main'"
+            echo '```'
+            echo ""
+            echo "---"
+            echo "_Opened and maintained automatically by \`.github/workflows/tag-drift-check.yml\`._"
+            echo "_It closes itself once the alias catches up. Last checked: [run](${RUN_URL})._"
+          } > issue-body.md
+
+          if [ -n "$existing" ]; then
+            # Edit rather than comment: a daily comment on a week-long drift is
+            # noise, and the body should always show the CURRENT gap.
+            gh issue edit "$existing" --body-file issue-body.md
+            echo "refreshed #$existing"
+          else
+            gh issue create --title "$TITLE" --body-file issue-body.md
+          fi
+
+      - name: Fail if the alias has drifted
+        if: steps.alias.outputs.rc != '0'
+        run: |
+          echo "::error::v1 is not in sync with main — see the job summary"
+          exit 1
+
+  # ==========================================================================
+  # Surface 2: the in-repo self-pins. Separate job on purpose — this one is
+  # expected to be red between bumps, and must not be able to mask surface 1.
+  # ==========================================================================
+  pins:
+    name: self-pins vs main
+    runs-on: ${{ fromJSON(vars.VIGIL_RUNNER_JSON || '["ubuntu-latest"]') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure main and tags are present
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin +refs/heads/main:refs/remotes/origin/main
+          git rev-parse --verify 'origin/main^{commit}' >/dev/null
 
       - name: Check the in-repo self-pins against main
         id: pins
+        shell: bash {0}
         run: |
           set -uo pipefail
-          out="$(bash .github/scripts/tagctl.sh pins --branch origin/main)"; rc=$?
+
+          rc=0
+          out="$(bash .github/scripts/tagctl.sh pins --branch origin/main)" || rc=$?
           printf '%s\n' "$out"
 
           {
-            echo ""
-            echo "### \`F2iLLC/vigil@<sha>\` self-pins"
+            echo "## \`F2iLLC/vigil@<sha>\` self-pins"
             echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -114,8 +281,8 @@ jobs:
           fi
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
-      - name: Fail if either surface has drifted
-        if: steps.alias.outputs.rc != '0' || steps.pins.outputs.rc != '0'
+      - name: Fail if a self-pin is stale
+        if: steps.pins.outputs.rc != '0'
         run: |
-          echo "::error::release pins have drifted — see the job summary"
+          echo "::error::stale self-pins — see the job summary"
           exit 1
