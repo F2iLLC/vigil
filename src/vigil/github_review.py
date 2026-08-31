@@ -188,6 +188,34 @@ def _build_review_body(
             "single lead-model pass with no specialist review behind it — not a "
             "substitute for one. This verdict does not approve the PR.\n"
         )
+
+    # A blocking verdict that the specialist table does not support says so,
+    # here, next to the verdict (F2iLLC/vigil#81). On F2iLLC/LunaOS#5082 the
+    # header read BLOCK and the footer read "1/7 specialists approved · 0
+    # rejections", with nothing connecting them: a reader following this
+    # review's own documented advice — read the n/N line and the per-specialist
+    # rows — would have concluded the PR passed. Attribution is not a gate and
+    # changes none: it only stops the verdict and the table from disagreeing
+    # silently, so the reader knows whose call this is and what to check.
+    if is_blocking_decision(result.decision) and result.specialist_verdicts:
+        objecting = [
+            v.persona for v in result.specialist_verdicts
+            if v.reviewed and is_blocking_decision(v.decision)
+        ]
+        if objecting:
+            sections.append(
+                f"> ⚠️ **Blocking specialists:** {', '.join(objecting)}.\n"
+            )
+        else:
+            ran = sum(1 for v in result.specialist_verdicts if v.reviewed)
+            total_specialists = len(result.specialist_verdicts)
+            sections.append(
+                "> ⚠️ **This verdict is the lead reviewer's alone.** No "
+                f"specialist objected — {ran} of {total_specialists} ran and none "
+                "returned a blocking verdict. The block rests entirely on the lead "
+                "findings below; check them before acting on it.\n"
+            )
+
     sections.append(f"{result.summary}\n")
 
     # Specialist verdicts summary
@@ -660,7 +688,60 @@ def post_review(
             for item in suppressed_findings
         )
     )
-    blocking_verdict = is_blocking_decision(result.decision) and not deblocked_stale_only
+
+    # --- A block nobody can act on and Vigil cannot withdraw (#81) ---
+    #
+    # Vigil cannot dismiss its own review. A REQUEST_CHANGES therefore costs a
+    # human two manual actions to undo — dismiss the review and resolve the
+    # thread it opened — and until they take them the PR is stalled. That price
+    # is worth paying for a finding. It is never worth paying for a blocking
+    # verdict that cites nothing.
+    #
+    # Two ways a review reaches that state, and only the second is new:
+    #   * every finding it had was withheld by head validation, or
+    #   * the lead returned a blocking decision with no findings at all.
+    # On F2iLLC/LunaOS#5082 the aggregate was BLOCK while the table read
+    # "1/7 approved, 0 rejections": the block was the lead's alone, and the
+    # single finding under it was false (F2iLLC/vigil#81).
+    #
+    # The narrowing that keeps this from being a fail-open: it applies ONLY
+    # when no specialist returned a blocking verdict of its own. A specialist
+    # REQUEST_CHANGES is independent evidence that something is wrong — that is
+    # exactly why #74 was careful to leave `result.decision` alone when its
+    # findings were withheld — so a specialist-backed block still blocks with
+    # zero surviving findings, byte for byte as before.
+    #
+    # Like `deblocked_stale_only`, this changes only the submitted event and
+    # what the body says. `result.decision` is untouched, so the reviewer-layer
+    # boundary in #79 ("a blocking lead verdict is never downgraded") still
+    # holds where it was drawn: at the verdict, not at the gate.
+    #
+    # A profile with no specialists at all is deliberately left alone. "No
+    # specialist objected" says nothing when there was no specialist to object,
+    # and #79 settled that configuration on exactly this reasoning: nothing was
+    # skipped there, so there is no false green to correct. #81's shape is a
+    # populated panel that did not agree with the verdict, and that is all this
+    # guard claims to fix.
+    specialist_blocked = any(
+        v.reviewed and is_blocking_decision(v.decision)
+        for v in result.specialist_verdicts
+    )
+    unsubstantiated_block = bool(
+        is_blocking_decision(result.decision)
+        and result.specialist_verdicts
+        and not specialist_blocked
+        and not remaining_findings
+    )
+
+    if unsubstantiated_block:
+        log.info(
+            "Withholding %s: no specialist blocked and no finding survived to "
+            "support it — posting as COMMENT (issue #81)",
+            result.decision,
+        )
+
+    deblocked = deblocked_stale_only or unsubstantiated_block
+    blocking_verdict = is_blocking_decision(result.decision) and not deblocked
 
     inline_comments: list[dict] = []
     body_findings: list[tuple[str | None, Finding]] = []
@@ -730,6 +811,19 @@ def post_review(
                     "evidence validation. " + result.summary
                 ),
             })
+        elif unsubstantiated_block:
+            # Say which verdict was withheld and why. The prose below is the
+            # lead's own, unedited — a reader who wants its read can still have
+            # it; they just cannot mistake it for a gate (#81).
+            displayed_result = result.model_copy(update={
+                "decision": "COMMENT",
+                "summary": (
+                    f"A **{result.decision}** verdict was withheld: no specialist "
+                    "returned a blocking verdict and no finding survived to "
+                    "support it, so this review reports rather than blocks. "
+                    + result.summary
+                ),
+            })
         text = _build_review_body(
             displayed_result,
             inline_count=inline_count,
@@ -762,7 +856,7 @@ def post_review(
         DECISION_NOT_REVIEWED: "COMMENT",
     }
     event = event_map.get(result.decision, "COMMENT")
-    if deblocked_stale_only:
+    if deblocked:
         event = "COMMENT"
 
     # Tracks what GitHub actually accepted, as the fallback ladder degrades.
