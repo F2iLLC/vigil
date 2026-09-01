@@ -11,6 +11,7 @@ the issue thread. These tests exist so it cannot come back silently.
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -19,6 +20,13 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TAGCTL = REPO_ROOT / ".github" / "scripts" / "tagctl.sh"
 CHECK_INPUTS = REPO_ROOT / ".github" / "scripts" / "check_action_inputs.py"
+
+# Resolve the interpreter rather than trusting the OS to pick it. On Linux CI
+# this is just "/usr/bin/bash". On Windows, CreateProcess searches System32
+# before PATH, so a bare "bash" finds WSL's stub, which cannot exec /bin/bash
+# and fails every test in this file with an empty stdout that reads like a
+# tooling bug rather than a missing interpreter. PATH lookup finds Git Bash.
+BASH = shutil.which("bash") or "bash"
 
 
 # --------------------------------------------------------------------------
@@ -44,7 +52,7 @@ def git(repo: Path, *args: str) -> str:
 
 def tagctl(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", str(TAGCTL), *args],
+        [BASH, str(TAGCTL), *args],
         cwd=repo,
         capture_output=True,
         text=True,
