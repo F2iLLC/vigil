@@ -28,6 +28,7 @@ workflow for the right reason.
 
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 from pathlib import Path
@@ -339,4 +340,377 @@ def test_drift_opens_a_tracking_issue() -> None:
     assert "gh issue create" in body and "gh issue close" in body, (
         "the tracking job must both open the issue on drift and close it once "
         "the alias catches up; a tracker that only opens becomes noise"
+    )
+
+
+# --------------------------------------------------------------------------
+# trigger guards (issue #82, third recurrence)
+#
+# The workflow could not see the thing it exists to watch. Its triggers were
+# `push: branches: [main]`, a daily cron and `workflow_dispatch`, and *moving
+# the alias fires none of them* — moving `v1` is a tag push, not a push to
+# `main`. So after every release the tracking issue kept asserting drift that
+# had already been cleared, for up to a full cron period. Observed on
+# 2026-09-01: the release moved `v1` to `dfba3d0` (== `origin/main`) at
+# 03:28Z, the drift check's last run was 13:56Z the previous day, and issue
+# #85 stayed open saying "1 commit behind" the whole time.
+#
+# A check that is wrong in the ALARMING direction is how a control becomes
+# background noise — see the 26 ignored red runs this file already documents.
+# These tests pin the two triggers that close the gap, and, just as
+# importantly, pin the shape of the tag filter: a pattern that also matched
+# semver would make the problem worse, not better.
+# --------------------------------------------------------------------------
+WORKFLOW_DIR = REPO_ROOT / ".github" / "workflows"
+RELEASE_WORKFLOW_NAME = "Release (move major alias tag)"
+
+
+def triggers(wf: dict) -> dict:
+    """Return the workflow's trigger map, working around YAML 1.1.
+
+    ``yaml.safe_load`` parses the bare key ``on:`` as the *boolean* ``True``
+    (YAML 1.1 treats ``on``/``off``/``yes``/``no`` as booleans), so
+    ``wf["on"]`` raises ``KeyError`` and any test that reaches for it with a
+    ``.get(...)`` default silently passes by inspecting a key that does not
+    exist. Look under both, and let the caller assert it found something.
+    """
+    return wf.get("on", wf.get(True))
+
+
+class UnsupportedFilterPattern(Exception):
+    """Raised for a filter pattern whose meaning is not unambiguous.
+
+    This is not a limitation to work around — it is the point. See
+    ``test_the_translator_refuses_the_ambiguous_quantified_class`` below.
+    """
+
+
+def filter_pattern_to_regex(pattern: str) -> "re.Pattern[str]":
+    """Translate a GitHub Actions filter pattern into an anchored regex.
+
+    Filter patterns are NOT regexes, and the difference is exactly what this
+    fix had to get right. Per GitHub's filter-pattern cheat sheet:
+
+      ``*``   Matches zero or more characters, but does not match ``/``.
+              (``Octo*`` matches ``Octocat``)
+      ``**``  Matches zero or more of any character.
+      ``?``   Matches zero or one of the preceding character.
+      ``+``   Matches one or more of the preceding character.
+      ``[]``  Matches one alphanumeric character listed in the brackets or
+              included in ranges; ranges may only use ``a-z``, ``A-Z``, ``0-9``.
+              (``[CB]at`` matches ``Cat`` or ``Bat``; ``[1-2]00`` matches
+              ``100`` and ``200``)
+
+    Two things follow that matter here. First, a bracket expression matches
+    exactly ONE character, so a pattern built only from literals and bracket
+    classes has a fixed width and cannot match a longer string — which is how
+    the tag filter is kept away from semver. Second, ``+`` and ``?`` are
+    documented as quantifying "the preceding CHARACTER", and a bracket range
+    is not a character; this translator therefore refuses to guess what
+    ``[0-9]+`` means rather than encoding one reading of it as if it were
+    settled fact.
+
+    Filter patterns are whole-string matches, so the result is anchored.
+    """
+    out = ["\\A"]
+    # The regex fragment emitted for the most recent atom, or None when the
+    # previous token cannot legally carry a quantifier.
+    last_atom: str | None = None
+    i = 0
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\":
+            i += 1
+            if i >= len(pattern):
+                raise UnsupportedFilterPattern(f"trailing backslash in {pattern!r}")
+            last_atom = re.escape(pattern[i])
+            out.append(last_atom)
+        elif ch == "*":
+            if pattern.startswith("**", i):
+                out.append(".*")
+                i += 1
+            else:
+                out.append("[^/]*")
+            last_atom = None
+        elif ch in "?+":
+            if last_atom is None:
+                raise UnsupportedFilterPattern(
+                    f"{ch!r} in {pattern!r} has no unambiguous preceding character; "
+                    "GitHub documents it as quantifying 'the preceding character', "
+                    "and a class or wildcard is not a character"
+                )
+            quant = "?" if ch == "?" else "+"
+            out[-1] = f"(?:{out[-1]}){quant}"
+            last_atom = None
+        elif ch == "[":
+            end = pattern.find("]", i + 1)
+            if end == -1:
+                raise UnsupportedFilterPattern(f"unterminated '[' in {pattern!r}")
+            body = pattern[i + 1 : end]
+            if not re.fullmatch(r"(?:[A-Za-z0-9]-[A-Za-z0-9]|[A-Za-z0-9])+", body):
+                raise UnsupportedFilterPattern(
+                    f"bracket body {body!r} in {pattern!r} is not alphanumeric; "
+                    "ranges may only use a-z, A-Z and 0-9"
+                )
+            out.append(f"[{body}]")
+            # A bracket class is deliberately NOT a quantifiable atom here.
+            last_atom = None
+            i = end
+        elif ch == "!":
+            raise UnsupportedFilterPattern(
+                f"negation is not modelled by this helper: {pattern!r}"
+            )
+        else:
+            last_atom = re.escape(ch)
+            out.append(last_atom)
+        i += 1
+    out.append("\\Z")
+    return re.compile("".join(out))
+
+
+def workflow_names_by_file() -> dict[Path, str]:
+    """Every workflow in ``.github/workflows`` mapped to its declared ``name``."""
+    names: dict[Path, str] = {}
+    for path in sorted(WORKFLOW_DIR.glob("*.y*ml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
+        if isinstance(doc, dict) and isinstance(doc.get("name"), str):
+            names[path] = doc["name"]
+    return names
+
+
+def test_the_translator_matches_githubs_own_documented_examples() -> None:
+    """Sanity-check the helper against the cheat sheet's worked examples.
+
+    The tests below are only as trustworthy as this translation, so pin it to
+    the examples GitHub itself publishes rather than to our reading of them.
+    """
+    assert filter_pattern_to_regex("Octo*").fullmatch("Octocat")
+    assert filter_pattern_to_regex("[CB]at").fullmatch("Cat")
+    assert filter_pattern_to_regex("[CB]at").fullmatch("Bat")
+    assert not filter_pattern_to_regex("[CB]at").fullmatch("Hat")
+    assert filter_pattern_to_regex("[1-2]00").fullmatch("100")
+    assert filter_pattern_to_regex("[1-2]00").fullmatch("200")
+    assert not filter_pattern_to_regex("[1-2]00").fullmatch("300")
+    # `*` does not cross a path separator; `**` does.
+    assert not filter_pattern_to_regex("releases/*").fullmatch("releases/1/2")
+    assert filter_pattern_to_regex("releases/**").fullmatch("releases/1/2")
+
+
+def test_the_translator_refuses_the_ambiguous_quantified_class() -> None:
+    """`v[0-9]+` is the pattern this fix deliberately did NOT use.
+
+    It is the obvious thing to write and it reads like a regex, but GitHub
+    documents `+` as matching "one or more of the preceding CHARACTER", and a
+    bracket range is not a character. On the literal reading `v[0-9]+` means
+    `v`, one digit, then a literal `+` sign — which matches no tag this repo
+    will ever push. Betting a monitoring control on which reading the runner
+    implements is precisely the class of mistake issue #82 is about, so the
+    translator refuses it and the workflow spells the widths out instead.
+    """
+    with pytest.raises(UnsupportedFilterPattern):
+        filter_pattern_to_regex("v[0-9]+")
+
+
+def test_the_drift_check_runs_when_the_alias_tag_is_pushed() -> None:
+    """A hand-pushed alias move must re-run the check immediately.
+
+    Pre-fix, the only `push` filter was `branches: [main]`. Moving `v1` is a
+    tag push, so the workflow did not run, and the tracking issue went on
+    claiming drift until the next daily cron. The 2026-08-30 and 2026-08-31
+    alias moves were both made this way.
+    """
+    on = triggers(load_workflow())
+    assert on is not None, (
+        "no trigger map found — note that `yaml.safe_load` parses the key "
+        "`on:` as the boolean True, not the string 'on'"
+    )
+    push = on.get("push")
+    assert isinstance(push, dict) and "tags" in push, (
+        "the drift check does not trigger on any tag push, so moving the `v1` "
+        "alias — the only event that can clear the drift — does not re-run it; "
+        f"push filter is {push!r}"
+    )
+    patterns = push["tags"]
+    assert patterns, "the `tags` filter is present but empty"
+
+    matchers = [filter_pattern_to_regex(p) for p in patterns]
+
+    def matches(tag: str) -> bool:
+        return any(m.fullmatch(tag) for m in matchers)
+
+    for alias in ("v1", "v2", "v10"):
+        assert matches(alias), (
+            f"the alias tag {alias!r} does not match any of {patterns!r}, so a "
+            "release that moves it would not re-run this check"
+        )
+
+
+def test_the_tag_filter_cannot_match_a_semver_tag() -> None:
+    """Firing on the semver push would make the drift report WORSE.
+
+    `release.yml` triggers on `v[0-9]+.[0-9]+.[0-9]+`. If this workflow shared
+    that trigger it would start *before* the release job had moved the alias,
+    report the drift that release is about to clear, refresh the tracking issue
+    with it — and then never re-run once the alias actually landed, because
+    nothing else fires. A stale alarm the release itself just re-armed is
+    strictly worse than the daily cron.
+    """
+    push = triggers(load_workflow())["push"]
+    matchers = [filter_pattern_to_regex(p) for p in push["tags"]]
+
+    for semver in ("v1.2.0", "v1.1.0", "v1.0.0", "v2.0.0", "v10.20.30", "v0.0.1"):
+        offenders = [
+            p for p, m in zip(push["tags"], matchers) if m.fullmatch(semver)
+        ]
+        assert not offenders, (
+            f"pattern(s) {offenders!r} match the semver tag {semver!r}; the drift "
+            "check would then run on the release tag push, before the alias has "
+            "moved, and leave a false 'behind' report nothing re-runs to clear"
+        )
+
+
+def test_the_two_tag_filters_partition_the_release_events() -> None:
+    """Cross-check against `release.yml` rather than against our own reading.
+
+    The two workflows must respond to disjoint tag pushes: the alias move is
+    this file's business, the semver cut is `release.yml`'s. Pinning the
+    property against the *other* file's live filter catches a future edit to
+    either one that lets them overlap.
+
+    `release.yml` uses `v[0-9]+.[0-9]+.[0-9]+`, which the translator above
+    refuses (see its docstring). It does not need to be translated: the
+    separating property is structural. Every release pattern contains a
+    literal `.` that a matching tag must supply, and every drift pattern is a
+    fixed-width run of literals and single-character classes with no `.` in
+    it. A fixed-width dotless pattern cannot match a string containing a dot,
+    and a pattern requiring a dot cannot match an alias tag, which has none.
+    """
+    drift_patterns = triggers(load_workflow())["push"]["tags"]
+    release_wf = yaml.safe_load(
+        (WORKFLOW_DIR / "release.yml").read_text(encoding="utf-8")
+    )
+    release_patterns = triggers(release_wf)["push"]["tags"]
+
+    assert all("." in p for p in release_patterns), (
+        "release.yml's tag filter no longer requires a literal dot, so it may "
+        f"now also fire on an alias push: {release_patterns!r}"
+    )
+    assert not any("." in p or "*" in p for p in drift_patterns), (
+        "the drift check's tag filter gained a `.` or a `*`, either of which "
+        f"can reach a semver tag: {drift_patterns!r}"
+    )
+    for alias in ("v1", "v2", "v10"):
+        assert "." not in alias  # the premise, stated so it cannot rot
+
+
+
+def test_the_drift_check_runs_when_the_release_workflow_completes() -> None:
+    """The automated release path is invisible to the tag trigger.
+
+    `release.yml`'s `publish` job force-pushes `refs/tags/v1` using the default
+    `GITHUB_TOKEN`, and GitHub deliberately does not start new workflow runs
+    from events created with that token. The 2026-09-01T03:28Z release proves
+    it: the alias moved and *no* run of any workflow was created by that tag
+    push. So the tag filter alone leaves the automated path uncovered, and
+    `workflow_run` is the only trigger that closes it.
+    """
+    on = triggers(load_workflow())
+    wr = on.get("workflow_run")
+    assert isinstance(wr, dict), (
+        "no `workflow_run` trigger: a release performed by `release.yml` moves "
+        "the alias with GITHUB_TOKEN, which starts no workflow runs, so nothing "
+        "would re-run this check until the next daily cron"
+    )
+    assert RELEASE_WORKFLOW_NAME in (wr.get("workflows") or []), (
+        f"the `workflow_run` trigger must name {RELEASE_WORKFLOW_NAME!r}; got "
+        f"{wr.get('workflows')!r}"
+    )
+    assert "completed" in (wr.get("types") or []), (
+        "the trigger must fire on `completed`; a release that fails after "
+        f"`publish` has pushed the tag has still moved the alias. Got {wr.get('types')!r}"
+    )
+
+
+def test_the_workflow_run_trigger_names_a_workflow_that_exists() -> None:
+    """`workflow_run` matches on the workflow's NAME, not its filename.
+
+    That makes it silently breakable in two directions: rename the release
+    workflow's `name:` and this trigger stops firing, or move the file and the
+    same. Nothing fails loudly at the time — the drift check simply reverts to
+    once-a-day and the tracking issue goes stale again, which is the exact
+    defect being fixed. So resolve the name against every workflow file's
+    declared `name:` rather than hardcoding a path.
+    """
+    named = workflow_names_by_file()
+    matches = [path for path, name in named.items() if name == RELEASE_WORKFLOW_NAME]
+    assert matches, (
+        f"the drift check's `workflow_run` trigger names {RELEASE_WORKFLOW_NAME!r}, "
+        "but no workflow in .github/workflows declares that name — the trigger "
+        f"can never fire. Declared names: {sorted(named.values())!r}"
+    )
+    assert len(matches) == 1, (
+        f"{RELEASE_WORKFLOW_NAME!r} is declared by more than one workflow "
+        f"({[p.name for p in matches]!r}); `workflow_run` would be ambiguous"
+    )
+    # And it is still the workflow that actually moves the alias, not some
+    # other file that happened to adopt the name.
+    assert "git push --force origin" in matches[0].read_text(encoding="utf-8"), (
+        f"{matches[0].name} carries the release workflow's name but no longer "
+        "pushes a tag; the drift check would be reacting to the wrong workflow"
+    )
+
+
+def test_the_original_triggers_are_preserved() -> None:
+    """The new triggers are additive. Each old one still covers a real case.
+
+    `push: branches: [main]` catches the merge that *creates* the drift (so it
+    is reported within a minute of landing, not the next morning); the cron is
+    the backstop for an alias moved by some path neither new trigger sees, and
+    re-states a drift left unaddressed for a day; `workflow_dispatch` is how a
+    maintainer confirms the fleet by hand. Dropping any of them while adding
+    the new ones would trade one blind spot for another.
+    """
+    on = triggers(load_workflow())
+    assert on is not None
+
+    assert "main" in (on["push"].get("branches") or []), (
+        f"push-to-main trigger lost; got {on['push'].get('branches')!r}"
+    )
+    assert on.get("schedule"), "the daily cron backstop was removed"
+    assert any("cron" in entry for entry in on["schedule"]), (
+        f"the schedule entry declares no cron: {on['schedule']!r}"
+    )
+    # `workflow_dispatch:` with no inputs parses as None, so test membership,
+    # not truthiness.
+    assert "workflow_dispatch" in on, "manual dispatch was removed"
+
+
+def test_the_alias_job_stays_report_only() -> None:
+    """Regression guard: this job must never be able to move a tag.
+
+    It now runs on tag pushes and on the completion of the release workflow,
+    which puts it one careless edit away from looking like a natural place to
+    "just move the alias while we're here". It is not. The release is a
+    fleet-wide, human-gated act that belongs to `release.yml` and its `release`
+    environment; a reporter that can also ship is no longer a reporter. The
+    permissions are the enforcement, so assert them exactly.
+    """
+    wf = load_workflow()
+    alias_job = next(
+        job
+        for job in wf["jobs"].values()
+        if any(s.get("id") == "alias" for s in job.get("steps", []))
+    )
+    assert alias_job.get("permissions") == {
+        "contents": "read",
+        "issues": "write",
+    }, (
+        "the alias job's permissions must stay exactly `contents: read` + "
+        "`issues: write`. `contents: write` would make this report-only check "
+        f"capable of performing a release. Got {alias_job.get('permissions')!r}"
+    )
+    body = "\n".join(step.get("run", "") for step in alias_job["steps"])
+    assert "git push" not in body, (
+        "the drift check must never push anything — it reports on the release, "
+        "it does not perform one"
     )
