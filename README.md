@@ -5,7 +5,7 @@ AI-powered, model-agnostic pull-request review with domain-specialist teams.
 Vigil routes a PR diff to focused reviewers, asks a lead reviewer to synthesize their verdicts, posts actionable findings on the relevant diff lines, and can track non-blocking follow-up work as GitHub issues.
 
 > [!IMPORTANT]
-> This README documents `main`. The `v1` action tag is a **moving major alias**, repointed only by an explicit release — see [Releases and version pinning](#releases-and-version-pinning) — so it can lag `main` by one or more merged changes. The `Tag drift check` workflow reports the current gap on a schedule. If you need exactly the behaviour documented here, pin the commit shown in the reusable workflow rather than `@v1`.
+> This README documents `main`. The `v1` action tag is a **moving major alias**, repointed only by an explicit release — see [Releases and version pinning](#releases-and-version-pinning) — so it can lag `main` by one or more merged changes. The `Tag drift check` workflow reports the current gap on a schedule. `v1` is the current recommended pin. The commit pinned inside the reusable workflow (`.github/workflows/reusable-vigil.yml`) is **not** a way to get `main`'s behaviour — that pin is independent and can lag, and currently does lag, behind `v1` itself (see [Central reusable workflow](#central-reusable-workflow)). If you need exactly the behaviour documented here, pin an explicit `main` commit SHA yourself.
 
 ## How it works
 
@@ -322,6 +322,16 @@ Do not symlink workflow files across repositories. A Git symlink to a path outsi
 
 Use the reusable workflow instead. Each repository keeps this small caller:
 
+> [!NOTE]
+> `.github/workflows/reusable-vigil.yml` pins the composite action itself at a
+> fixed commit SHA that does **not** follow `@v1`. That pin is currently
+> stale relative to `v1`/`main`. Every current consumer instead calls the
+> composite action directly at `@v1` (see
+> [Direct composite-action use](#direct-composite-action-use)); none currently
+> calls this reusable workflow. Whether the reusable workflow remains a
+> supported adoption path going forward is an open decision tracked in
+> [F2iLLC/vigil#88](https://github.com/F2iLLC/vigil/issues/88).
+
 ```yaml
 # .github/workflows/vigil.yml
 name: Vigil PR Review
@@ -454,7 +464,10 @@ git tag -a v1.2.0 -m "Vigil v1.2.0" && git push origin v1.2.0
 Pushing the semver tag is the whole release. The workflow resolves `v1` from
 the tag's major component, runs the full test suite, checks `action.yml`
 inputs for consumer-breaking changes, waits for approval on the `release`
-environment, then force-moves and pushes the annotated `v1`.
+environment, then force-moves and pushes the annotated `v1`. That approval
+wait only actually gates anything if the `release` environment has required
+reviewers configured — see the guard note below and
+[F2iLLC/vigil#87](https://github.com/F2iLLC/vigil/issues/87).
 
 `workflow_dispatch` is the escape hatch for moving the alias without cutting a
 number. It defaults to **dry run**; untick it to actually publish.

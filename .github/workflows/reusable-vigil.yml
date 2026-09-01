@@ -252,15 +252,20 @@ jobs:
       # Pin the composite action independently from this reusable workflow.
       # Update this one reference when a reviewed Vigil implementation lands.
       #
-      # NOTE: the `force` and `reason` inputs below were added alongside
-      # F2iLLC/vigil#49, and `context-provider` / `context-label` /
-      # `context-token` alongside F2iLLC/vigil#47; none of them exist at the
-      # pinned SHA. GitHub treats unknown composite-action inputs as a
-      # warning, not an error, so this is safe — but the on-demand
-      # '/vigil review' fix and the external context seam both stay INERT
-      # until this pin is advanced to a commit that contains them. The fork
-      # gate above still evaluates either way, so advancing the pin cannot
-      # quietly expose a provider to a fork PR.
+      # NOTE: this pin does not follow `v1` and is currently behind `main`
+      # (see the "Tag drift check" workflow / F2iLLC/vigil#88 for the current
+      # gap). That said, the action's *input surface* at this pinned SHA is
+      # byte-identical to `main`'s `action.yml`, so the `force` / `reason`
+      # inputs below (F2iLLC/vigil#49) and `context-provider` /
+      # `context-label` / `context-token` (F2iLLC/vigil#47) are all declared
+      # at this pin and are LIVE here, not inert. What the 6 commits of drift
+      # actually change is review logic (src/vigil/**), not this action's
+      # declared inputs. The fork gate above still evaluates regardless, so
+      # advancing the pin cannot quietly expose a provider to a fork PR.
+      # Whether this reusable workflow remains a supported adoption path at
+      # all — versus consumers calling the composite action directly at
+      # `@v1` the way every current consumer does — is an open owner
+      # decision tracked in F2iLLC/vigil#88; this comment does not decide it.
       - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory }}
