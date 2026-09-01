@@ -187,8 +187,18 @@ cmd_pins() {
         printf 'pin\t%s\t%s\tbehind:%s\n' "$file" "$ref" "$behind"
         stale=1
       fi
+    # Anchored to the `uses:` KEY, not to the text `uses:` anywhere on the
+    # line — issue #93. The old unanchored `.*uses:` also matched prose that
+    # merely mentions a pin, and `tag-drift-check.yml` says `uses:
+    # F2iLLC/vigil@v1` inside an echo string. That phantom counted as a fourth
+    # pin and, being the moving alias, could report drift and redden the job
+    # for something that is not a pin at all.
+    # A real pin is a step, so allow the optional YAML list marker: both
+    # `      - uses: F2iLLC/vigil@<ref>` and a bare mapping `uses:` count.
+    # POSIX BRE intervals (`\{0,1\}`) rather than GNU's `\?`, so this keeps
+    # working on any conforming sed.
     done < <(git show "${branch}:${file}" 2>/dev/null \
-               | sed -n 's|.*uses:[[:space:]]*F2iLLC/vigil@\([A-Za-z0-9._/-]*\).*|\1|p')
+               | sed -n 's|^[[:space:]]*\(-[[:space:]]\{1,\}\)\{0,1\}uses:[[:space:]]*F2iLLC/vigil@\([A-Za-z0-9._/-]*\).*|\2|p')
   done < <(git ls-tree -r --name-only "$branch" -- .github/workflows/)
 
   printf 'pins_found=%s\n' "$found"
