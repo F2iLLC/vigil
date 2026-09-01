@@ -44,15 +44,101 @@
 # The tracker deliberately watches ONLY the `v1` alias. The self-pins are stale
 # by construction between bumps; tracking them here would leave an issue open
 # permanently and recreate the exact saturation this file is fixing.
+#
+# THE THIRD DEFECT: THE TRACKER DID NOT NOTICE THE FIX (#82 again)
+# ----------------------------------------------------------------
+# Adding the tracking issue above closed one hole and opened another. This
+# workflow's original triggers were `push: branches: [main]`, a daily cron and
+# `workflow_dispatch` — and *moving the alias fires none of them*. Moving `v1`
+# is a tag push, not a push to `main`.
+#
+# So the control was wrong in the ALARMING direction for up to a full cron
+# period after every release: the tracking issue kept asserting drift that had
+# already been cleared. Observed on 2026-09-01:
+#
+#     33466335330  2026-09-01T03:28:21Z  Release (move major alias tag)  success
+#     33399777004  2026-08-31T13:56:51Z  Tag drift check   schedule      failure
+#
+# The release moved `v1` to `dfba3d0` (== `origin/main`) at 03:28Z. The drift
+# check's most recent run was from 13:56Z the *previous day*, and issue #85 sat
+# open past it, still saying "1 commit behind". That is not a harmless
+# inaccuracy. Defect 2 above is the record of what happens to a check that
+# cries wolf: 26 red runs, all ignored, and a real 21-hour drift lost in the
+# noise. A tracker that stays red after the problem is fixed teaches people to
+# stop reading it, which is the same failure with extra steps.
+#
+# WHY TWO NEW TRIGGERS, AND WHY NEITHER IS REDUNDANT
+# ---------------------------------------------------
+# The alias can move down two different paths, and each new trigger covers
+# exactly one of them:
+#
+#  * `workflow_run` on **Release (move major alias tag)** — the automated path.
+#    When `release.yml`'s `publish` job force-pushes `refs/tags/v1` it does so
+#    with the default `GITHUB_TOKEN`, and GitHub deliberately does not start
+#    new workflow runs from events created with that token. So that tag push
+#    created NO workflow run at all — which is exactly why a `push: tags:`
+#    trigger ALONE would not have caught the 03:28Z release above.
+#    `workflow_run` is the only trigger that can see the automated path.
+#
+#  * `push:` on the alias tag pattern — the human path. The 2026-08-30 and
+#    2026-08-31 alias moves were made by hand with a plain `git push`, which
+#    carries a human credential and therefore does start workflow runs.
+#    `workflow_run` cannot see those, because no release workflow ran.
+#
+# Both, therefore; dropping either one reopens a real hole. `types:
+# [completed]` rather than a success filter: a release that fails *after*
+# `publish` has already pushed the tag has still moved the alias, and
+# re-deriving the answer costs one runner-minute and cannot be wrong, so there
+# is no reason to be selective about it.
+#
+# This stays REPORT-ONLY under both new triggers. The `alias` job holds
+# `contents: read` + `issues: write` and has no step that pushes anything: it
+# reacts to a release, it does not perform one.
 
 name: Tag drift check
 
 on:
   push:
     branches: [main]
+    tags:
+      # ALIAS TAGS ONLY — this list must never match a semver tag.
+      #
+      # `release.yml` triggers on `v[0-9]+.[0-9]+.[0-9]+`. If this workflow
+      # also fired on the semver push it would start BEFORE `release.yml` had
+      # moved the alias, report drift that is about to be cleared, refresh the
+      # tracking issue with it, and then never re-run once the alias landed —
+      # strictly worse than the daily cron it is meant to improve on.
+      #
+      # These are GitHub filter patterns, NOT regexes. Per the filter-pattern
+      # cheat sheet, `[]` "matches one alphanumeric character listed in the
+      # brackets or included in ranges" (`[1-2]00` matches `100` and `200`),
+      # and `+` "matches one or more of the PRECEDING CHARACTER". A bracket
+      # range is not a character, so `v[0-9]+` is ambiguous at best: on the
+      # literal reading it is `v`, one digit, then a `+` sign. Rather than bet
+      # the correctness of a monitoring control on that ambiguity, spell the
+      # widths out. Each pattern below is a fixed number of single-character
+      # classes, so none of them can match a `.` under any reading — `v1.2.0`
+      # is unmatchable by construction rather than by intent.
+      #
+      # Covers v0..v99. Add `v[0-9][0-9][0-9]` if this repo ever ships a
+      # three-digit major; a missing pattern degrades to the daily cron, which
+      # is the pre-existing behaviour and not a regression.
+      - "v[0-9]"
+      - "v[0-9][0-9]"
+  workflow_run:
+    # The automated release path — see the header. `release.yml` pushes the
+    # alias with GITHUB_TOKEN, which by design starts no workflow runs, so the
+    # tag filter above cannot see it and this is the only trigger that can.
+    #
+    # The name is matched as a literal string against `release.yml`'s `name:`.
+    # Renaming that workflow would silently stop this trigger firing, so a
+    # test asserts the two strings are equal.
+    workflows: ["Release (move major alias tag)"]
+    types: [completed]
   schedule:
-    # Daily. Clears itself the moment a release is cut; until then it is a
-    # standing reminder rather than a one-time notification that scrolls away.
+    # Daily. The backstop, not the primary signal: it catches an alias moved
+    # by some path neither trigger above covers, and it re-states a drift that
+    # has gone unaddressed for a day.
     - cron: "17 6 * * *"
   workflow_dispatch:
 
@@ -60,7 +146,28 @@ permissions:
   contents: read
 
 concurrency:
-  group: vigil-tag-drift-${{ github.ref }}
+  # DELIBERATELY NOT KEYED ON `github.ref` — it was, until the triggers above
+  # made that unsafe.
+  #
+  # Every run of this workflow answers one global question: does
+  # `v1^{commit}` equal `origin/main`? Nothing about that question is
+  # parameterised by the ref a run happens to be attached to. Both jobs
+  # re-fetch `origin/main` and re-read the real tag, and `tagctl.sh pins`
+  # reads the workflow files out of `origin/main` with `git ls-tree`/`git
+  # show` rather than out of the checkout, so a run's answer does not depend
+  # on its own checkout either.
+  #
+  # That makes superseding always safe: the newer run's answer is at least as
+  # current as the one it cancels, and after a release the newer one is the
+  # only one that is right. Keying on the ref would NOT have been safe, since
+  # the new tag-push runs carry `refs/tags/v1` and would land in their own
+  # bucket — free to run CONCURRENTLY with a scheduled run on
+  # `refs/heads/main`. Both would find no open tracking issue, both would `gh
+  # issue create`, and the result is two issues sharing the single fixed title
+  # that is the entire dedupe key — of which the close path only ever closes
+  # one, leaving a permanent false alarm. Superseding a stale run is what we
+  # want; racing one is not.
+  group: vigil-tag-drift
   cancel-in-progress: true
 
 jobs:
@@ -82,6 +189,17 @@ jobs:
         with:
           # Tags and full history are both required: without them the alias
           # cannot be peeled and the commit counts are meaningless.
+          #
+          # On a `push` to a TAG ref this checks out the tag, not `main`, and
+          # the workflow definition used is the one at that commit. That is
+          # fine here, and was checked rather than assumed: the only file this
+          # job executes out of the checkout is `.github/scripts/tagctl.sh`,
+          # which is present at any commit the alias can legally point at
+          # (`plan-move` refuses a target not contained in `main`); the step
+          # below fetches `origin/main` and the tags explicitly instead of
+          # trusting checkout's refspec; and every comparison downstream is
+          # expressed against `origin/main` and the real `v1`, never against
+          # `HEAD`. The answer is therefore identical from either checkout.
           fetch-depth: 0
 
       - name: Ensure main and tags are present
