@@ -265,6 +265,7 @@ def test_pins_flags_a_self_pin_that_is_behind_the_branch(repo: Path) -> None:
     assert result.returncode == 3
     assert "status=stale" in result.stdout
     assert "behind:" in result.stdout
+    assert "pins_found=1" in result.stdout
 
 
 def test_pins_reports_all_current_when_the_pin_is_at_head(repo: Path) -> None:
@@ -280,6 +281,90 @@ def test_pins_reports_all_current_when_the_pin_is_at_head(repo: Path) -> None:
     result = tagctl(repo, "pins", "--branch", "main")
     assert result.returncode == 0
     assert "status=all-current" in result.stdout
+    assert "pins_found=1" in result.stdout
+
+
+def test_pins_ignores_a_pin_quoted_inside_a_run_step(repo: Path) -> None:
+    """Issue #93: prose that *mentions* a pin is not a pin.
+
+    `tag-drift-check.yml` explains the alias to a human by echoing the string
+    ``uses: F2iLLC/vigil@v1``. The old unanchored `.*uses:` counted that echo
+    as a fourth pin, and because the phantom ref was the moving alias it could
+    report drift and redden the self-pins job over a sentence. The counter is
+    the load-bearing assertion here — the two tests above never checked it,
+    which is exactly how this survived.
+    """
+    workflows = repo / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "wf.yml").write_text(
+        "jobs:\n"
+        "  a:\n"
+        "    steps:\n"
+        "      - uses: F2iLLC/vigil@main\n"
+        "      - name: explain\n"
+        "        run: |\n"
+        '          echo "`v1` is what every consumer pins '
+        '(`uses: F2iLLC/vigil@v1`), so"\n',
+        encoding="utf-8",
+    )
+    git(repo, "add", ".github")
+    git(repo, "commit", "-m", "add workflow")
+
+    result = tagctl(repo, "pins", "--branch", "main")
+    assert "pins_found=1" in result.stdout
+    assert "v1" not in result.stdout, f"phantom pin reported: {result.stdout!r}"
+    assert "status=all-current" in result.stdout
+    assert result.returncode == 0
+
+
+def test_pins_ignores_a_commented_out_pin(repo: Path) -> None:
+    """A `#` comment is documentation, not a step the runner will execute."""
+    workflows = repo / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "wf.yml").write_text(
+        "jobs:\n"
+        "  a:\n"
+        "    steps:\n"
+        "      # - uses: F2iLLC/vigil@v1\n"
+        "      - uses: F2iLLC/vigil@main\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", ".github")
+    git(repo, "commit", "-m", "add workflow")
+
+    result = tagctl(repo, "pins", "--branch", "main")
+    assert "pins_found=1" in result.stdout
+    assert "v1" not in result.stdout, f"phantom pin reported: {result.stdout!r}"
+    assert result.returncode == 0
+
+
+def test_pins_still_counts_a_bare_mapping_uses_entry(repo: Path) -> None:
+    """The #93 anchor must not over-tighten onto the list marker.
+
+    Issue #93 proposed anchoring at ``^\\s*uses:``. Every real pin in this
+    repository is a sequence item (``      - uses: ...``), so that anchor
+    would have matched nothing and reported all-clear forever. The dash is
+    therefore optional — and the dash-less mapping form still has to count.
+    """
+    workflows = repo / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    old = git(repo, "rev-parse", "HEAD")
+    (workflows / "wf.yml").write_text(
+        "jobs:\n"
+        "  a:\n"
+        "    steps:\n"
+        "      - name: run it\n"
+        f"        uses: F2iLLC/vigil@{old}\n",
+        encoding="utf-8",
+    )
+    git(repo, "add", ".github")
+    git(repo, "commit", "-m", "add workflow")
+    commit(repo, "later")
+
+    result = tagctl(repo, "pins", "--branch", "main")
+    assert "pins_found=1" in result.stdout
+    assert "behind:" in result.stdout
+    assert result.returncode == 3
 
 
 # --------------------------------------------------------------------------
