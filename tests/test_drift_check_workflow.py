@@ -81,6 +81,26 @@ def find_step(step_id: str) -> dict:
     raise AssertionError(f"no step with id={step_id!r} in {WORKFLOW.name}")
 
 
+def find_job(job_id: str) -> dict:
+    """Return the job named ``job_id``.
+
+    The #89 assertions are about what a *job* can do to the run conclusion,
+    not about one step, so they need the whole job rather than ``find_step``.
+    """
+    wf = load_workflow()
+    try:
+        return wf["jobs"][job_id]
+    except KeyError:  # pragma: no cover - guards a rename, not a code path
+        raise AssertionError(
+            f"no job {job_id!r} in {WORKFLOW.name}; jobs are {sorted(wf['jobs'])}"
+        ) from None
+
+
+def job_script(job_id: str) -> str:
+    """All ``run`` bodies of a job, concatenated."""
+    return "\n".join(step.get("run", "") for step in find_job(job_id).get("steps", []))
+
+
 def run_step(step: dict, repo: Path, tmp_path: Path) -> dict:
     """Execute a workflow step's ``run`` body the way the runner would.
 
@@ -714,3 +734,130 @@ def test_the_alias_job_stays_report_only() -> None:
         "the drift check must never push anything — it reports on the release, "
         "it does not perform one"
     )
+# --------------------------------------------------------------------------
+# #89: the run conclusion, and the over-correction guard
+# --------------------------------------------------------------------------
+# These four are deliberately static (YAML/text) rather than shell-driven.
+# They assert a property of the *workflow definition* — "which surface is
+# allowed to fail the run" — which is not observable from executing one step
+# body, and which must stay checkable on any box.
+def test_pins_job_cannot_fail_the_run() -> None:
+    """The self-pin job must not be able to turn the run red (#89).
+
+    GitHub rolls a run's conclusion up from its jobs, so splitting the two
+    surfaces into separate jobs (defect 2) fixed the job signal but left the
+    run signal saturated. The run conclusion was `failure` on 12 of 12 runs.
+    Only 3 of those postdate the split: two were genuinely red because `v1`
+    really was behind (#82), and one — run 33503843618 — had `v1 alias vs
+    main` green and was still reported `failure`. So since the split, every
+    run in which the fleet was actually healthy (1 of 1) was still reported
+    red.
+
+    And as wired it could not have done otherwise. ``tagctl.sh``'s ``cmd_pins``
+    decides "current" by exact equality against ``origin/main``'s head, while
+    writing a new pin SHA into a workflow file is *itself* a commit on main —
+    so a pin expressed as a SHA is one behind the head its own bump created.
+    All three real self-pins are SHAs, so the gate cannot pass. A gate that
+    cannot pass is broken, not policy. Hence: report only.
+
+    The claim is scoped deliberately. ``cmd_pins`` is *not* broken: a pin
+    written as a moving ref is reported current when that ref is at main —
+    see ``test_pins_reports_all_current_when_the_pin_is_at_head`` in
+    ``tests/test_release_tooling.py``. Re-expressing the self-pins as ``@v1``
+    is one of the options #88 is deciding, and report-only is the interim
+    wiring that removes the false red without pre-empting that ruling.
+    """
+    script = job_script("pins")
+    assert "exit 1" not in script, (
+        "a step in the pins job still exits non-zero, which fails the job and "
+        "therefore rolls the whole run up to `failure` — the by-design-red "
+        "state that made the run conclusion unreadable, red on 12 of 12 runs "
+        "including the one post-split run where the fleet was healthy"
+    )
+    assert "::error::" not in script, (
+        "the pins job still raises an ::error:: annotation; this surface is "
+        "expected to be stale between bumps, so it reports with ::warning::"
+    )
+
+
+def test_alias_job_still_fails_on_drift() -> None:
+    """The over-correction guard for the test above.
+
+    Making the pins surface report-only is only correct because something else
+    still gates. Real `v1` drift means every consumer pinning
+    ``F2iLLC/vigil@v1`` is running without merged fixes — that must still turn
+    the run red. If a later change quietens the alias job too, the workflow
+    goes permanently green and reproduces the original silence of #58/#82
+    from the opposite direction.
+    """
+    steps = find_job("alias").get("steps", [])
+    failing = [
+        step
+        for step in steps
+        if "exit 1" in step.get("run", "")
+        and "steps.alias.outputs.rc" in str(step.get("if", ""))
+    ]
+    assert failing, (
+        "the alias job no longer has a step that fails on drift; the workflow "
+        "can now never go red, so merged-but-unshipped fixes are silent again"
+    )
+
+
+def test_pins_step_still_reports_everything() -> None:
+    """Report-only must mean *report*, not go quiet.
+
+    The fix for #89 removes the failure, not the information. The annotation
+    is what shows up on the run page, and the table is the only place a
+    maintainer learns *which* file holds *which* stale pin — dropping either
+    would turn a noisy-but-informative surface into a silent one, which is
+    the defect this whole file was created to remove.
+    """
+    body = find_step("pins")["run"]
+    assert "::warning::" in body, (
+        "the pins step must still raise an annotation, or a stale pin is "
+        "invisible on the run page"
+    )
+    assert "$GITHUB_STEP_SUMMARY" in body, (
+        "the pins step must still write a job summary"
+    )
+    assert "| file | pin | state |" in body, (
+        "the per-file pin table must survive; without it the report names no "
+        "file and no SHA and cannot be acted on"
+    )
+
+    report = find_step("report")
+    assert "::warning::" in report["run"], (
+        "the stale-pin step must still annotate the run"
+    )
+    assert "::error::" not in report["run"] and "exit 1" not in report["run"], (
+        "the stale-pin step must not be able to fail the job"
+    )
+
+
+def test_pins_summary_declares_it_is_report_only() -> None:
+    """A surface that cannot fail must say so, in the place people read.
+
+    Otherwise the next maintainer sees a green job next to a table of stale
+    pins, reads it as a bug, and "fixes" it by restoring ``exit 1`` — putting
+    the run back to permanently red. The summary therefore states the intent,
+    the mechanism (a bump creates the very head it is then behind), and which
+    surface actually gates, and points at #88/#89 for the ruling and the
+    reasoning.
+    """
+    body = find_step("pins")["run"]
+    assert "report-only" in body, (
+        "the job summary must declare this surface report-only, or the next "
+        "reader restores the hard failure"
+    )
+    assert "unsatisfiable by construction" in body, (
+        "the summary must say *why* it cannot fail, not just that it does not"
+    )
+    assert "#89" in body and "#88" in body, (
+        "the summary must point at the issue that made this call (#89) and "
+        "the stale pin still awaiting a ruling (#88)"
+    )
+    assert "v1 alias vs main" in body, (
+        "the summary must name the surface that does gate, so a green pins "
+        "job is not mistaken for 'nothing is checking anything'"
+    )
+

@@ -31,6 +31,43 @@
 #     from background noise. The two surfaces are now independent jobs, so
 #     `v1 alias vs main` is genuinely green when the fleet is current.
 #
+#  3. IT WAS STILL PERMANENTLY RED ONE LEVEL UP (#89). Splitting the surfaces
+#     fixed the *job* signal but not the one people actually look at: GitHub
+#     rolls a run's conclusion up from its jobs, so a red `self-pins vs main`
+#     still paints the whole `Tag drift check` run red. The run conclusion has
+#     been `failure` on 12 of 12 runs. Only 3 of those postdate the split: two
+#     were genuinely red because `v1` really was behind (#82), and one — run
+#     33503843618 — had `v1 alias vs main` GREEN and was still reported
+#     `failure`. So since the split, every run in which the fleet was actually
+#     healthy (1 of 1) has still been reported red. That is defect 2's alert
+#     fatigue reproduced at the run level, and it trains people to ignore the
+#     one check that reports real release drift.
+#
+#     And as currently wired the gate is unsatisfiable, so it is a broken gate
+#     rather than a policy anyone is failing to honour. `cmd_pins` decides
+#     "current" with an EXACT equality against `origin/main`'s head, and
+#     writing a new pin SHA into a workflow file *is itself a commit on main* —
+#     so a pin expressed as a commit SHA is one behind the very head its own
+#     bump created. Verified experimentally: bump a SHA self-pin to the
+#     then-current head, commit that bump, and `pins` reports
+#     `behind:1 / status=stale / exit 3` immediately. All three real self-pins
+#     (`reusable-vigil.yml`, `ce4df1c…`) are SHA pins, so no sequence of bumps
+#     can make this job green while they stay SHAs.
+#
+#     Note the limit of that claim: the check itself is not broken. A pin
+#     written as a moving ref — `F2iLLC/vigil@v1` — resolves to the alias and
+#     IS reported current whenever the alias is at main, which is covered by
+#     `test_pins_reports_all_current_when_the_pin_is_at_head`. Expressing the
+#     self-pins as `@v1`, so this repo tracks the alias the way its consumers
+#     do, is one of the options #88 is deciding.
+#
+#     So surface 2 is now REPORT ONLY. It emits the same annotation and the
+#     same pin table and cannot fail. Surface 1 keeps its `exit 1` and is the
+#     single gating surface: the run still goes red on genuine alias drift,
+#     which is the only drift that means merged fixes are not reaching
+#     consumers. This removes the false red without pre-empting #88 — neither
+#     the equality test in `tagctl.sh` nor the pin style is changed here.
+#
 # WHY IT ALSO FILES AN ISSUE
 # --------------------------
 # A red scheduled workflow is demonstrably not enough: 26 of them were ignored.
@@ -382,6 +419,14 @@ jobs:
           {
             echo "## \`F2iLLC/vigil@<sha>\` self-pins"
             echo ""
+            echo "**This surface is report-only — it cannot fail the run (#89).**"
+            echo "A self-pin written as a commit SHA is unsatisfiable by construction:"
+            echo "writing the new SHA into a workflow file is itself a commit on"
+            echo "\`main\`, so the pin is \`behind:1\` the instant it is bumped. (A pin"
+            echo "written as \`@v1\` tracks the alias and can be current — that is one"
+            echo "of the options #88 is deciding.) The gating surface is the"
+            echo "\`v1 alias vs main\` job."
+            echo ""
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$rc" -eq 0 ]; then
@@ -399,8 +444,12 @@ jobs:
           fi
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
 
-      - name: Fail if a self-pin is stale
+      # REPORT ONLY, deliberately. See defect 3 in the header: while the
+      # self-pins are commit SHAs this gate cannot be satisfied, so failing on
+      # it only taught people to ignore the run. The annotation and the pin
+      # table above carry the whole signal; `v1 alias vs main` does the gating.
+      - name: Report stale self-pins (report-only — never fails)
+        id: report
         if: steps.pins.outputs.rc != '0'
         run: |
-          echo "::error::stale self-pins — see the job summary"
-          exit 1
+          echo "::warning::stale self-pins (report-only, see the job summary) — the gating surface is the v1 alias job"
