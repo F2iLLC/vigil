@@ -61,12 +61,87 @@ def merge_specialist_findings(
         - deduped_findings: List of findings with cross-specialist duplicates merged
         - merged_info: List of MergedFinding info for each merged group
     """
-    # Collect all specialist findings with attribution and verdict details
-    specialist_findings: list[tuple[str, Finding, PersonaVerdict]] = []
-    for v in verdicts:
-        for f in v.findings:
-            specialist_findings.append((v.persona, f, v))
+    return _merge_specialist_items(
+        [(v.persona, f, v) for v in verdicts for f in v.findings],
+        kind="findings",
+    )
 
+
+def merge_specialist_observations(
+    verdicts: list[PersonaVerdict],
+) -> tuple[list[Finding], list[MergedFinding]]:
+    """Merge observations from multiple specialists (F2iLLC/vigil#96).
+
+    The observation path is the twin of :func:`merge_specialist_findings` and
+    exists for the same reason: several specialists describing one defect in
+    their own words are one defect, not several. Only the findings path was
+    ever deduped across specialists, so a single defect that six specialists
+    each raised as an observation became six near-identical auto-filed GitHub
+    issues — the in-run guard in ``issue_manager`` keys on
+    ``stable_finding_key``, and six different sentences produce six different
+    keys once ``_canonical_predicate`` falls back to lexical content.
+
+    Grouping happens on the same stable semantic identity the findings path
+    uses, so the two paths cannot drift apart.
+
+    Args:
+        verdicts: List of PersonaVerdict objects from specialists
+
+    Returns:
+        (deduped_observations, merged_info) tuple, with the same semantics as
+        :func:`merge_specialist_findings`.
+    """
+    return _merge_specialist_items(
+        [(v.persona, o, v) for v in verdicts for o in v.observations],
+        kind="observations",
+    )
+
+
+# A consensus persona string is embedded in a GitHub issue title, and GitHub
+# caps a title at 256 characters. Six short specialist names are nowhere near
+# that, but the specialist count is a profile setting, so bound it rather than
+# assume it stays small.
+_MAX_CONSENSUS_PERSONA_LEN = 120
+
+
+def consensus_persona(specialists: list[str]) -> str:
+    """Render the specialists behind one merged item as a single persona string.
+
+    ``ReviewResult.observation_sources`` is ``list[tuple[str, Finding]]`` and
+    ``issue_manager`` renders that string verbatim into the issue title and the
+    body's ``**Reviewer:**`` line, so attribution for a merged observation has
+    to fit in one string or be lost. Joining with " + " keeps every contributor
+    visible in exactly the place a reader looks for the reviewer, and uses only
+    characters that survive ``utils.validate_specialist_name`` intact apart
+    from the separator itself (which degrades to a space, never to nothing).
+
+    The full, untruncated list always stays available on
+    ``MergedFinding.specialists``; only this rendering is bounded.
+    """
+    names = [name for name in specialists if name]
+    if not names:
+        return "Vigil"
+    joined = " + ".join(names)
+    if len(joined) <= _MAX_CONSENSUS_PERSONA_LEN:
+        return joined
+    return f"{names[0]} + {len(names) - 1} others"
+
+
+def _merge_specialist_items(
+    specialist_findings: list[tuple[str, Finding, PersonaVerdict]],
+    kind: str = "findings",
+) -> tuple[list[Finding], list[MergedFinding]]:
+    """Group (persona, finding, verdict) triples by stable identity and merge.
+
+    Shared by the findings and the observations path so the two can never
+    disagree about what "the same defect" means.
+
+    A group of one is kept as-is. A group of more than one keeps a single
+    representative — the highest severity, with ties resolved in favour of the
+    first encountered, which makes the output deterministic and stable under
+    input order — and records every contributing specialist in a
+    ``MergedFinding`` so attribution is preserved rather than dropped.
+    """
     if not specialist_findings:
         return [], []
 
@@ -123,8 +198,9 @@ def merge_specialist_findings(
             )
 
             log.info(
-                "Merged %d specialist findings: %s:%s [%s] — %s",
+                "Merged %d specialist %s: %s:%s [%s] — %s",
                 len(specialists),
+                kind,
                 rep_finding.file,
                 rep_finding.line,
                 rep_finding.category,

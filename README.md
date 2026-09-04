@@ -32,10 +32,10 @@ Each specialist receives only the files relevant to its domain. Security skips d
 - **Seven default specialists plus a lead**, with an eight-specialist enterprise profile for regulated systems.
 - **Inline findings on blocking verdicts only**, relocated to a valid changed line when the model cites an un-commentable location. An approving review reports its findings in the review body, so it never opens a thread it does not intend to block on.
 - **Actionable observation gate** that rejects model-generated praise or notes without a concrete follow-up action.
-- **Automatic issue tracking** for non-blocking observations, with severity-matched priority labels and open-issue deduplication.
+- **Automatic issue tracking** for non-blocking observations, with severity-matched priority labels, cross-specialist merging, and open-issue deduplication.
 - **PR conversation context** so specialists and the lead can check claims against top-level comments and prior review bodies.
 - **No documentation exemption** — Markdown and text changes get the same specialist and lead review as code.
-- **Cross-specialist consensus** that merges duplicate findings into one comment with specialist attribution.
+- **Cross-specialist consensus** that merges duplicate findings into one comment, and duplicate observations into one issue, with specialist attribution on both.
 - **Cross-round deduplication** against active and resolved Vigil comments.
 - **Defensive output handling** that validates structured model responses and sanitizes model-generated Markdown before posting.
 - **Decision log** that suppresses acknowledged, accepted, wontfix, or false-positive patterns.
@@ -609,7 +609,7 @@ src/vigil/
 |-- comment_manager.py         Conversation, thread, and resolution lifecycle
 |-- context_manager.py         Cross-round fingerprints and filtering
 |-- external_context.py       Pluggable external review-context provider
-|-- cross_specialist_dedup.py  Consensus merging and formatting
+|-- cross_specialist_dedup.py  Consensus merging (findings and observations) and formatting
 |-- issue_manager.py           Observation issue creation and deduplication
 |-- decision_log.py            SQLite-backed decision memory
 |-- alerts.py                  SMTP and LunaOS escalation delivery
@@ -627,7 +627,7 @@ The current pipeline:
 5. Route relevant hunks to each specialist sequentially.
 6. Filter known decisions and send optional specialist alerts.
 7. Run the lead reviewer with specialist results and conversation evidence.
-8. Merge duplicate cross-specialist findings into consensus findings.
+8. Merge duplicate cross-specialist findings into consensus findings, and duplicate cross-specialist observations into consensus observations that name every specialist that raised them.
 9. Create deduplicated issues for non-blocking observations.
 10. Filter cross-round duplicates and post the review: findings inline on a blocking verdict, in the body as advisory notes otherwise, with fallbacks.
 

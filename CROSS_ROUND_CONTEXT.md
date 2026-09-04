@@ -7,7 +7,7 @@ This document describes the implementation of Issue #7 (cross-round context) and
 Vigil now prevents two common problems in multi-round reviews:
 
 1. **Cross-Round Re-flagging** — Vigil no longer re-posts findings that were already flagged in previous review rounds, even if the PR author didn't explicitly dismiss them
-2. **Cross-Specialist Spam** — When multiple specialists flag the same issue at the same location, Vigil merges them into a single comment showing which specialists flagged it
+2. **Cross-Specialist Spam** — When multiple specialists flag the same issue at the same location, Vigil merges them into a single comment showing which specialists flagged it. This applies to both paths: blocking *findings* become one comment, and non-blocking *observations* become one auto-filed issue (F2iLLC/vigil#96)
 
 ## Architecture
 
@@ -46,7 +46,7 @@ filtered = filter_cross_round_duplicates(new_findings, existing_comments)
 ```
 
 #### `src/vigil/cross_specialist_dedup.py`
-Handles merging findings flagged by multiple specialists.
+Handles merging findings — and observations — flagged by multiple specialists.
 
 **Key Concepts:**
 - **Merged Finding**: When multiple specialists flag the same issue, combine them
@@ -58,6 +58,13 @@ Handles merging findings flagged by multiple specialists.
   - Returns: `(deduped_findings, merged_info)`
   - `deduped_findings`: List of findings with cross-specialist duplicates removed
   - `merged_info`: List of MergedFinding objects with specialist attribution
+- `merge_specialist_observations(verdicts)` — The same API for the observation path
+  (F2iLLC/vigil#96). Same grouping, same representative rule, same return shape;
+  observations are what Vigil auto-files GitHub issues from, so a defect that
+  merges as a finding must merge as an observation too or one defect becomes one
+  issue per specialist.
+- `consensus_persona(specialists)` — Render the contributors of a merged item as the
+  single persona string `observation_sources` and the issue body both carry
 - `format_merged_finding_comment(finding, specialists, session_ids)` — Format for display
 - `find_cross_specialist_duplicates(specialist_findings)` — Group by fingerprint
 
@@ -79,15 +86,29 @@ if merged:
 ### Modified Modules
 
 #### `src/vigil/reviewer.py`
-**Change:** Added Step 3.5 before creating ReviewResult
+**Change:** Added Step 3.5 and Step 3.6 before creating ReviewResult
 
 After all specialists complete and lead review runs, but before building the final ReviewResult:
 ```python
-# --- Step 3.5: Cross-specialist deduplication ---
+# --- Step 3.5: Cross-specialist deduplication (findings) ---
 merge_specialist_findings(verdicts)  # modifies verdicts in-place
+
+# --- Step 3.6: Cross-specialist deduplication (observations) ---
+merge_specialist_observations(verdicts)  # rebuilds observations/observation_sources
 ```
 
-This ensures the ReviewResult contains deduplicated findings from the start.
+This ensures the ReviewResult contains deduplicated findings *and* deduplicated
+observations from the start. Step 3.6 also logs
+`Deduped N cross-specialist observation group(s)`, mirroring the findings log, so
+"deduplicated" is evidenced in the run record rather than merely asserted.
+
+`ReviewResult.observation_sources` keeps exactly one `(persona, observation)`
+entry per surviving observation — `issue_manager` builds its persona map from
+`id(observation)`, so a duplicate or missing entry would misattribute the filed
+issue. For a merged observation the persona is the `consensus_persona` string
+naming every contributor, which `issue_manager` renders verbatim into the issue
+title and the body's `**Reviewer:**` line; the untruncated list stays on
+`MergedFinding.specialists`.
 
 #### `src/vigil/github_review.py`
 **Change:** Added Step 0 at the start of `post_review()`
@@ -166,6 +187,33 @@ merge_specialist_findings([security_verdict, logic_verdict])
 
 Dangerous SQL concatenation — use parameterized queries
 ```
+
+### Cross-Specialist Observation Deduplication (Issue #96)
+
+Observations take the same route, and it matters more there: Vigil auto-files a
+GitHub issue per surviving observation. Before #96 only the findings path was
+merged, so six specialists describing one defect in six different sentences
+produced six different `stable_finding_key` values (the key falls back to the
+message's content words when the model emits no structured `predicate`), and the
+in-run guard in `issue_manager` filed six near-identical issues for one defect.
+
+```
+merge_specialist_observations([security_verdict, logic_verdict, ...])
+# Returns:
+#   deduped_observations = [Finding(...)]  # one copy, the highest-severity one
+#   merged_info = [MergedFinding(finding=..., specialists=["Security", "Logic", ...], count=6)]
+```
+
+**Filed Issue:**
+```
+[Vigil/Security + Logic + Performance] duplication: ...
+
+**Reviewer:** Security + Logic + Performance
+```
+
+Grouping uses the same `stable_finding_key` identity as the findings path, so
+two genuinely different defects are never collapsed — only what would already
+have merged as a finding merges as an observation.
 
 ## Finding Fingerprint Details
 
@@ -306,10 +354,18 @@ Tests for cross-specialist merging:
 - Formatted comment output
 - MergedFinding data structure
 
+### `tests/test_observation_dedup.py`
+Tests for cross-specialist merging on the observation path (#96):
+- Six specialists, one defect, one surviving observation and one issue
+- Genuinely different defects are never collapsed
+- The representative is the highest-severity member of the group
+- Every contributing specialist stays recoverable, in the source and in the issue
+
 **Run tests:**
 ```bash
 pytest tests/test_context_manager.py -v
 pytest tests/test_cross_specialist_dedup.py -v
+pytest tests/test_observation_dedup.py -v
 ```
 
 ## Performance Considerations
