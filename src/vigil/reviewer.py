@@ -446,7 +446,8 @@ def review_diff(
     3. Send email alerts for alert-enabled personas
     4. Merge overlapping findings from multiple specialists into single comments
     5. Run lead reviewer with all verdicts
-    6. Return aggregated result with merged findings in lead_findings
+    6. Merge overlapping observations across specialists the same way
+    7. Return aggregated result with merged findings in lead_findings
 
     Args:
         diff: Raw unified diff text.
@@ -474,7 +475,10 @@ def review_diff(
         ReviewResult with:
         - specialist_verdicts: verdicts with merged findings removed
         - lead_findings: aggregated lead findings + deduped merged findings
-        - observations: all non-blocking observations from all specialists
+        - observations: non-blocking observations from all specialists, with
+          cross-specialist duplicates merged the same way findings are (#96)
+        - observation_sources: one (persona, observation) entry per surviving
+          observation; the persona of a merged one names every contributor
     """
     lead_model = lead_model or model
 
@@ -754,6 +758,90 @@ def review_diff(
             all_observations.append(obs)
             observation_sources.append((v.persona, obs))
 
+    # --- Step 3.6: Cross-specialist observation deduplication (#96) ---
+    #
+    # Step 3.5 above merges duplicate *findings* across specialists. The
+    # observation path had no equivalent, and observations are what Vigil
+    # auto-files GitHub issues from. The in-run guard in
+    # `issue_manager.create_issues_for_observations` keys on
+    # `stable_finding_key`, which falls back to the message's content words
+    # when the model emits no structured predicate — so six specialists
+    # describing one defect in six different sentences produced six different
+    # keys and six near-identical issues (F2iLLC/vigil#96, which filed
+    # relara#1032/1033/1034/1036/1037/1038 for a single defect while the
+    # review body claimed a zero-duplication rule had been applied).
+    #
+    # Grouping here uses the same identity function as Step 3.5, so a defect
+    # that would merge as a finding also merges as an observation.
+    #
+    # Defensive in the same way as Step 3.5: a dedup failure must never break
+    # a review, so the un-merged aggregation above stands if anything throws.
+    # Both outputs are rebuilt into locals and only swapped in at the end, so
+    # a mid-loop failure cannot leave a half-deduped pair behind.
+    observation_consensus: list = []
+    try:
+        from .cross_specialist_dedup import (
+            consensus_persona,
+            merge_specialist_observations,
+        )
+        from .models import ObservationConsensus
+
+        deduped_observations, observation_merged_info = merge_specialist_observations(
+            verdicts
+        )
+
+        # id() is the contract `issue_manager` already uses to map an
+        # observation back to its persona, so keep exactly one entry per
+        # surviving representative.
+        persona_by_obs_id = {id(obs): persona for persona, obs in observation_sources}
+        merged_by_obs_id = {
+            id(info.finding): info for info in observation_merged_info
+        }
+
+        deduped_sources: list[tuple[str, Finding]] = []
+        deduped_consensus: list = []
+        for obs in deduped_observations:
+            info = merged_by_obs_id.get(id(obs))
+            if info is not None:
+                # Attribution for a merged observation is carried in the
+                # persona string itself, which issue_manager renders verbatim
+                # into the issue title and the body's "Reviewer:" line — so
+                # the recorded source and the filed issue always name the same
+                # set of specialists.
+                deduped_sources.append((consensus_persona(info.specialists), obs))
+                # Grouping merges on cited location as well as on semantic
+                # identity, so the other members are differently worded and may
+                # raise different concerns about the same place. Their text is
+                # carried through to the issue body rather than discarded —
+                # that is the condition location-based merging rests on.
+                others = [
+                    (name, member.file, member.message)
+                    for name, member in zip(info.specialists, info.original_findings)
+                    if member is not obs
+                ]
+                if others:
+                    deduped_consensus.append(
+                        ObservationConsensus(observation=obs, also_reported_by=others)
+                    )
+            else:
+                deduped_sources.append((persona_by_obs_id.get(id(obs), "Vigil"), obs))
+
+        all_observations = deduped_observations
+        observation_sources = deduped_sources
+        observation_consensus = deduped_consensus
+
+        if observation_merged_info:
+            import logging
+            logging.getLogger(__name__).info(
+                "Deduped %d cross-specialist observation group(s)",
+                len(observation_merged_info),
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).debug(
+            "Cross-specialist observation dedup failed: %s", e
+        )
+
     return ReviewResult(
         decision=decision,
         summary=summary,
@@ -764,4 +852,5 @@ def review_diff(
         lead_findings=lead_findings,
         observations=all_observations,
         observation_sources=observation_sources,
+        observation_consensus=observation_consensus,
     )
