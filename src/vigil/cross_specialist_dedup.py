@@ -13,6 +13,8 @@ from .context_manager import (
     FindingFingerprint,
     find_cross_specialist_duplicates,
     fingerprint_finding,
+    normalize_line_range,
+    stable_finding_key,
 )
 from .models import Finding, PersonaVerdict, Severity
 from .utils import (
@@ -81,8 +83,9 @@ def merge_specialist_observations(
     ``stable_finding_key``, and six different sentences produce six different
     keys once ``_canonical_predicate`` falls back to lexical content.
 
-    Grouping happens on the same stable semantic identity the findings path
-    uses, so the two paths cannot drift apart.
+    Grouping is by :func:`_group_by_key_or_location`: the findings path's
+    stable semantic identity, widened to also catch specialists that cited the
+    same place. Identity alone did not reach it — see that function.
 
     Args:
         verdicts: List of PersonaVerdict objects from specialists
@@ -94,6 +97,7 @@ def merge_specialist_observations(
     return _merge_specialist_items(
         [(v.persona, o, v) for v in verdicts for o in v.observations],
         kind="observations",
+        by_location=True,
     )
 
 
@@ -115,10 +119,15 @@ def consensus_persona(specialists: list[str]) -> str:
     characters that survive ``utils.validate_specialist_name`` intact apart
     from the separator itself (which degrades to a space, never to nothing).
 
+    A specialist can contribute more than once to the same group (nothing stops
+    one persona raising two observations that share an identity), so names are
+    de-duplicated in first-seen order rather than rendered as
+    ``Security + Security``.
+
     The full, untruncated list always stays available on
     ``MergedFinding.specialists``; only this rendering is bounded.
     """
-    names = [name for name in specialists if name]
+    names = list(dict.fromkeys(name for name in specialists if name))
     if not names:
         return "Vigil"
     joined = " + ".join(names)
@@ -127,28 +136,209 @@ def consensus_persona(specialists: list[str]) -> str:
     return f"{names[0]} + {len(names) - 1} others"
 
 
+# How many trailing path segments must agree for two cited paths to be treated
+# as the same file. Two, not one: models paraphrase a path's leading segments
+# (`backend/app/services/x.py` vs `backend/services/x.py` in the bioqms-core
+# cluster below) but rarely its tail, while matching on the bare basename alone
+# would fuse `src/a/index.ts` with `src/b/index.ts`.
+_PATH_TAIL_SEGMENTS = 2
+
+# How far apart two cited lines may be and still be "the same place".
+#
+# A heuristic, and labelled one. Specialists agree on the file and on the
+# defect but not on the line — they pick different lines inside the block they
+# are describing. Measured across the clusters in F2iLLC/vigil#96:
+# relara#1032-1038 all cited line 73; relara#1110/1111 cited 135 and 136;
+# relara#1106/1107/1108 cited 395, 415 and 423 for one duplicated-UPDATE loop.
+# The widest adjacent gap that has to close is 20 lines, so a +/-10 window is
+# the minimum that works; 25 is roughly a function body, which is the unit a
+# model is actually pointing at when it says "the contact update loop", and it
+# leaves margin without being file-wide.
+#
+# ``_normalize_line_range``'s own default of 2 is deliberately NOT changed:
+# fingerprinting and cross-round dedup depend on it, and they are matching one
+# reviewer against its own earlier self, not several reviewers against each
+# other. The wider context is passed in explicitly, here, for this path only.
+_OBSERVATION_LINE_PROXIMITY = 25
+
+
+def _location_identity(finding: Finding) -> tuple[str, tuple[int, int] | None] | None:
+    """The place a finding points at: a path bucket and a line range.
+
+    The path collapses to its last :data:`_PATH_TAIL_SEGMENTS` segments, so two
+    specialists that disagree about a file's leading directories still land in
+    one bucket — the model wrote both ``backend/app/services/audit_outbox.py``
+    and ``backend/services/audit_outbox.py`` for one defect. Two segments, not
+    one: the bare basename would fuse ``src/a/index.ts`` with ``src/b/index.ts``.
+    A path with fewer segments than that is used whole.
+
+    The line is a range widened by :data:`_OBSERVATION_LINE_PROXIMITY`, or
+    ``None`` when the model gave no line. ``None`` matches only ``None``: an
+    unanchored observation must never absorb one that named a line, or the
+    anchored defect's own line stops being what identified it.
+
+    Returns ``None`` for a finding with no usable path at all, which then groups
+    on semantic identity only.
+    """
+    path = finding.file.replace("\\", "/").strip("/").lower()
+    if not path or path == "n/a":
+        return None
+    segments = [seg for seg in path.split("/") if seg]
+    if not segments:
+        return None
+    tail = "/".join(segments[-_PATH_TAIL_SEGMENTS:])
+
+    if finding.line is None or finding.line <= 0:
+        return tail, None
+    return tail, normalize_line_range(finding.line, _OBSERVATION_LINE_PROXIMITY)
+
+
+def _group_by_key_or_location(
+    specialist_findings: list[tuple[str, Finding]],
+) -> list[list[tuple[str, Finding]]]:
+    """Group observations by semantic identity OR by the place they point at.
+
+    Identity alone does not reach the defect this exists for. ``stable_finding_key``
+    is ``sha256(component + predicate)``, and ``_canonical_predicate`` compares a
+    supplied ``predicate`` as its content words in order, falling back to the
+    message's content words when the model emits none. Several specialists
+    describing one defect in their own sentences therefore produce several
+    distinct keys, and the in-run guard in ``issue_manager`` — which keys on the
+    same function — files one issue for each. Both real clusters behind
+    F2iLLC/vigil#96 look like that:
+
+    * relara#1032/1033/1034/1036/1037/1038 — six personas, six categories, six
+      messages, six different ``vigil-finding-key`` markers, and one identical
+      location: ``packages/api/src/middleware/rate-limit.ts:73``.
+    * bioqms-core#1571/1574/1580/1581/1583 — five personas, five categories, one
+      docstring defect, no line number at all, and the cited path itself split
+      between ``backend/app/services/audit_outbox.py`` and
+      ``backend/services/audit_outbox.py``.
+    * relara#1106/1107/1108 — three personas, one duplicated-UPDATE loop, cited
+      at lines 395, 415 and 423 of one file.
+    * relara#1110/1111 — two personas, one backslash-escape defect, cited at
+      lines 135 and 136.
+
+    The last two are why the line test is proximity rather than equality: models
+    agree on the file and the defect, then point at different lines inside the
+    block they are describing. Transitivity does the rest and is intended, not
+    incidental — 395 is within range of 415 and 415 of 423, so all three become
+    one group even where the outermost pair would be a stretch on its own.
+
+    Location was the only thing that identified either cluster as one defect,
+    and it is what ``find_cross_specialist_duplicates``' own docstring always
+    claimed to key on. No lexical threshold could substitute: measured over the
+    fixtures in ``tests/test_observation_dedup.py``, the pairwise
+    ``SequenceMatcher`` ratio between six wordings of ONE defect (0.17-0.47) and
+    between genuinely different defects (0.18-0.37) overlap almost completely,
+    so any cut-off loose enough to catch paraphrase drops unrelated defects.
+
+    Grouping is transitive within the round: if A shares a key with B and B
+    shares a location with C, all three are one defect. A single round is all
+    this function ever sees.
+
+    THE TRADE-OFF, STATED RATHER THAN HIDDEN: this will sometimes merge two
+    genuinely different defects — most easily two unanchored observations in one
+    file, since every observation without a line collapses to that file's
+    bucket, and next most easily two concerns within the proximity window. The
+    wider the window, the likelier that is. It is accepted, and accepted only
+    because nothing is discarded: every contributing specialist's own message is carried into the
+    filed issue via ``ObservationConsensus.also_reported_by``. An issue that
+    contains two real concerns under one heading is strictly better than five
+    issues that contain one concern between them, and a reader can split it;
+    silently dropping a specialist's text would not be recoverable. That is the
+    load-bearing condition of this whole change, not a nicety.
+
+    This is the OBSERVATION path only. Findings post as inline comments where a
+    per-specialist voice is cheap and the behaviour is shipped; they still group
+    on identity alone.
+    """
+    parent = list(range(len(specialist_findings)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a: int, b: int) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            # Keep the earlier index as the root so groups come back in order of
+            # first appearance, which keeps the output deterministic.
+            parent[max(ra, rb)] = min(ra, rb)
+
+    first_by_key: dict[str, int] = {}
+    # Indices sharing one path bucket, and the line range each of them claims.
+    by_path: dict[str, list[int]] = {}
+    line_range: dict[int, tuple[int, int] | None] = {}
+
+    for i, (_, finding) in enumerate(specialist_findings):
+        key = stable_finding_key(finding)
+        if key in first_by_key:
+            union(first_by_key[key], i)
+        else:
+            first_by_key[key] = i
+
+        location = _location_identity(finding)
+        if location is not None:
+            path_tail, rng = location
+            by_path.setdefault(path_tail, []).append(i)
+            line_range[i] = rng
+
+    for indices in by_path.values():
+        unlined = [i for i in indices if line_range[i] is None]
+        lined = [i for i in indices if line_range[i] is not None]
+        # Every observation in one file that named no line is one place.
+        for later in unlined[1:]:
+            union(unlined[0], later)
+        # Lined ones join when their widened ranges overlap. Pairwise rather
+        # than by dict key because overlap is not an equivalence relation;
+        # union-find supplies the transitivity instead.
+        for position, a in enumerate(lined):
+            range_a = line_range[a]
+            for b in lined[position + 1:]:
+                range_b = line_range[b]
+                if range_a[0] <= range_b[1] and range_b[0] <= range_a[1]:
+                    union(a, b)
+
+    grouped: dict[int, list[tuple[str, Finding]]] = {}
+    for i, item in enumerate(specialist_findings):
+        grouped.setdefault(find(i), []).append(item)
+    return list(grouped.values())
+
+
 def _merge_specialist_items(
     specialist_findings: list[tuple[str, Finding, PersonaVerdict]],
     kind: str = "findings",
+    by_location: bool = False,
 ) -> tuple[list[Finding], list[MergedFinding]]:
-    """Group (persona, finding, verdict) triples by stable identity and merge.
+    """Group (persona, finding, verdict) triples and merge each group.
 
-    Shared by the findings and the observations path so the two can never
-    disagree about what "the same defect" means.
+    Shared by the findings and the observations path so the two agree on the
+    merge mechanics — representative selection, attribution, logging — and
+    differ only in how a group is formed.
 
     A group of one is kept as-is. A group of more than one keeps a single
     representative — the highest severity, with ties resolved in favour of the
     first encountered, which makes the output deterministic and stable under
     input order — and records every contributing specialist in a
     ``MergedFinding`` so attribution is preserved rather than dropped.
+
+    ``by_location`` widens grouping to also catch specialists citing the same
+    place. It is set for observations only: see :func:`_group_by_key_or_location`
+    for why that path needs it and why the shipped findings path does not change.
     """
     if not specialist_findings:
         return [], []
 
-    # Group by the stable semantic identity shared with cross-round/issue dedup.
-    groups = find_cross_specialist_duplicates(
-        [(name, finding) for name, finding, _ in specialist_findings]
-    )
+    pairs = [(name, finding) for name, finding, _ in specialist_findings]
+    if by_location:
+        groups = _group_by_key_or_location(pairs)
+    else:
+        # Unchanged: the stable semantic identity shared with cross-round and
+        # issue dedup.
+        groups = list(find_cross_specialist_duplicates(pairs).values())
 
     deduped_findings: list[Finding] = []
     merged_info: list[MergedFinding] = []
@@ -158,7 +348,7 @@ def _merge_specialist_items(
     for name, finding, verdict in specialist_findings:
         verdict_lookup[(name, id(finding))] = (verdict, finding)
 
-    for fp, group in groups.items():
+    for group in groups:
         if len(group) == 1:
             # Single specialist — keep as-is
             _, finding = group[0]

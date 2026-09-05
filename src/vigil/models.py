@@ -113,3 +113,34 @@ class ReviewResult(BaseModel):
     lead_findings: list[Finding]  # lead reviewer's own findings (scope, conventions, etc.)
     observations: list[Finding]  # all non-blocking observations aggregated
     observation_sources: list[tuple[str, Finding]] = []  # (persona_name, finding) for issue creation
+    # For an observation that several specialists raised, the ones whose
+    # wording did not become the representative. Keyed by object identity
+    # (`observation is result.observations[i]`), the same contract
+    # `observation_sources` already uses. Without it the merge would file
+    # one issue and silently discard what the other specialists said.
+    observation_consensus: list["ObservationConsensus"] = []
+
+
+class ObservationConsensus(BaseModel):
+    """What the specialists behind one merged observation each said.
+
+    ``observation`` is the surviving representative — the same object that
+    appears in ``ReviewResult.observations`` — and ``also_reported_by`` holds
+    ``(persona, file, message)`` for every other specialist that raised the same
+    defect. The representative's own message is not repeated here; it is
+    already the issue body's Finding section.
+
+    The cited ``file`` travels with each entry because a group can merge across
+    two spellings of one path (the model wrote both
+    ``backend/app/services/audit_outbox.py`` and
+    ``backend/services/audit_outbox.py`` for one defect). Rendering the ones
+    that differ keeps every spelling in the issue body, which is what
+    ``issue_manager._match_finding_to_issue`` substring-matches on in later
+    rounds.
+    """
+
+    observation: Finding
+    also_reported_by: list[tuple[str, str, str]] = []
+
+
+ReviewResult.model_rebuild()

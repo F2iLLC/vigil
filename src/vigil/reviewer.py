@@ -778,11 +778,13 @@ def review_diff(
     # a review, so the un-merged aggregation above stands if anything throws.
     # Both outputs are rebuilt into locals and only swapped in at the end, so
     # a mid-loop failure cannot leave a half-deduped pair behind.
+    observation_consensus: list = []
     try:
         from .cross_specialist_dedup import (
             consensus_persona,
             merge_specialist_observations,
         )
+        from .models import ObservationConsensus
 
         deduped_observations, observation_merged_info = merge_specialist_observations(
             verdicts
@@ -797,6 +799,7 @@ def review_diff(
         }
 
         deduped_sources: list[tuple[str, Finding]] = []
+        deduped_consensus: list = []
         for obs in deduped_observations:
             info = merged_by_obs_id.get(id(obs))
             if info is not None:
@@ -806,11 +809,26 @@ def review_diff(
                 # the recorded source and the filed issue always name the same
                 # set of specialists.
                 deduped_sources.append((consensus_persona(info.specialists), obs))
+                # Grouping merges on cited location as well as on semantic
+                # identity, so the other members are differently worded and may
+                # raise different concerns about the same place. Their text is
+                # carried through to the issue body rather than discarded —
+                # that is the condition location-based merging rests on.
+                others = [
+                    (name, member.file, member.message)
+                    for name, member in zip(info.specialists, info.original_findings)
+                    if member is not obs
+                ]
+                if others:
+                    deduped_consensus.append(
+                        ObservationConsensus(observation=obs, also_reported_by=others)
+                    )
             else:
                 deduped_sources.append((persona_by_obs_id.get(id(obs), "Vigil"), obs))
 
         all_observations = deduped_observations
         observation_sources = deduped_sources
+        observation_consensus = deduped_consensus
 
         if observation_merged_info:
             import logging
@@ -834,4 +852,5 @@ def review_diff(
         lead_findings=lead_findings,
         observations=all_observations,
         observation_sources=observation_sources,
+        observation_consensus=observation_consensus,
     )

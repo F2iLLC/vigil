@@ -74,8 +74,23 @@ def _build_issue_body(
     persona: str,
     pr_url: str = "",
     commit_sha: str = "",
+    also_reported_by: list[tuple[str, str, str]] | None = None,
 ) -> str:
-    """Build the GitHub issue body with full finding details."""
+    """Build the GitHub issue body with full finding details.
+
+    ``also_reported_by`` carries ``(persona, file, message)`` for the other
+    specialists whose observations merged into this one. Rendering them is not
+    decoration: cross-specialist merging groups by cited location as well as by
+    semantic identity, so a group's members are differently worded and may raise
+    genuinely different concerns about one place. Dropping their text would make
+    the merge silent data loss (F2iLLC/vigil#96).
+
+    They go in their own ``###`` section after ``### Finding`` and
+    ``### Suggestion``, never inside them: :func:`_match_finding_to_issue` reads
+    the Finding section back out and requires 0.85 similarity against the
+    representative's message, so diluting it would break cross-run matching for
+    exactly the issues this merging creates.
+    """
     emoji = severity_emoji(finding.severity)
     loc = finding.file
     if finding.line:
@@ -98,6 +113,25 @@ def _build_issue_body(
 
     if finding.suggestion:
         sections.append(f"\n### Suggestion\n\n{finding.suggestion}")
+
+    if also_reported_by:
+        also = [
+            "\n### Also reported by\n",
+            "Other specialists flagged the same location in this review. Their "
+            "wording is kept verbatim, so this issue may cover more than one "
+            "concern — split it if so.\n",
+        ]
+        for other_persona, other_file, other_message in also_reported_by:
+            # A path that differs from the representative's is shown in
+            # backticks so a later round citing that spelling still matches
+            # this issue on the path check.
+            if other_file and other_file != finding.file:
+                also.append(
+                    f"**{other_persona}** (`{other_file}`) — {other_message}\n"
+                )
+            else:
+                also.append(f"**{other_persona}** — {other_message}\n")
+        sections.append("\n".join(also))
 
     sections.append(
         "\n---\n"
@@ -219,10 +253,11 @@ def create_issue(
     persona: str,
     pr_url: str = "",
     commit_sha: str = "",
+    also_reported_by: list[tuple[str, str, str]] | None = None,
 ) -> str | None:
     """Create a GitHub issue for a finding. Returns the issue HTML URL or None on failure."""
     title = _build_issue_title(finding, persona)
-    body = _build_issue_body(finding, persona, pr_url, commit_sha)
+    body = _build_issue_body(finding, persona, pr_url, commit_sha, also_reported_by)
 
     url = f"https://api.github.com/repos/{owner}/{repo}/issues"
     try:
@@ -289,6 +324,14 @@ def create_issues_for_observations(
             for obs in v.observations:
                 persona_map[id(obs)] = v.persona
 
+    # What the other specialists in a merged group said, keyed on object
+    # identity like persona_map above. Absent for an unmerged observation.
+    also_reported_map: dict[int, list[tuple[str, str, str]]] = {
+        id(consensus.observation): consensus.also_reported_by
+        for consensus in result.observation_consensus
+        if consensus.also_reported_by
+    }
+
     issues: list[tuple[Finding, str]] = []
     created_by_key: dict[str, str] = {}
     for obs in result.observations:
@@ -312,6 +355,7 @@ def create_issues_for_observations(
             owner, repo, token, obs, persona,
             pr_url=pr_url,
             commit_sha=result.commit_sha,
+            also_reported_by=also_reported_map.get(id(obs)),
         )
         if issue_url:
             issues.append((obs, issue_url))

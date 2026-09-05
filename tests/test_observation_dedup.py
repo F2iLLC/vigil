@@ -20,7 +20,11 @@ from vigil.cross_specialist_dedup import (
     merge_specialist_findings,
     merge_specialist_observations,
 )
-from vigil.issue_manager import create_issues_for_observations
+from vigil.issue_manager import (
+    _build_issue_body,
+    _match_finding_to_issue,
+    create_issues_for_observations,
+)
 from vigil.models import Finding, PersonaVerdict, ReviewResult, Severity
 from vigil.personas import Persona, ReviewProfile
 from vigil.reviewer import review_diff
@@ -134,10 +138,19 @@ class TestMergeSpecialistObservations:
 
     def test_different_defects_are_not_collapsed(self):
         """Over-collapsing would be a worse bug than the one being fixed."""
-        v1 = _verdict("Security", [_obs("Token is logged", predicate="token logged")])
+        v1 = _verdict(
+            "Security",
+            [_obs("Token is logged", predicate="token logged", file="src/api/auth.py")],
+        )
         v2 = _verdict(
             "Performance",
-            [_obs("N+1 query in the loop", predicate="n plus one query")],
+            [
+                _obs(
+                    "N+1 query in the loop",
+                    predicate="n plus one query",
+                    file="src/worker/sync.py",
+                )
+            ],
         )
         deduped, merged = merge_specialist_observations([v1, v2])
         assert len(deduped) == 2
@@ -145,8 +158,20 @@ class TestMergeSpecialistObservations:
 
     def test_different_components_are_not_collapsed(self):
         """Same predicate in two unrelated components stays two observations."""
-        v1 = _verdict("Security", [_obs("Unvalidated input", component="src/api")])
-        v2 = _verdict("Logic", [_obs("Unvalidated input", component="src/worker")])
+        v1 = _verdict(
+            "Security",
+            [_obs("Unvalidated input", component="src/api", file="src/api/handler.py")],
+        )
+        v2 = _verdict(
+            "Logic",
+            [
+                _obs(
+                    "Unvalidated input",
+                    component="src/worker",
+                    file="src/worker/handler.py",
+                )
+            ],
+        )
         deduped, _ = merge_specialist_observations([v1, v2])
         assert len(deduped) == 2
 
@@ -231,14 +256,20 @@ def _llm_response(payload: dict):
     return resp
 
 
-def _specialist_response(name: str, predicate: str = PREDICATE, component: str = COMPONENT):
+def _specialist_response(
+    name: str,
+    predicate: str = PREDICATE,
+    component: str = COMPONENT,
+    file: str = "src/vigil/reviewer.py",
+    line: int | None = 715,
+):
     return _llm_response({
         "decision": "APPROVE",
         "checks": {"scan": "PASS"},
         "findings": [],
         "observations": [{
-            "file": "src/vigil/reviewer.py",
-            "line": 715,
+            "file": file,
+            "line": line,
             "severity": "medium",
             "category": "duplication",
             "message": (
@@ -303,8 +334,14 @@ class TestReviewerAggregatesDedupedObservations:
     def test_distinct_observations_both_survive(self, mock_llm, mock_alerts):
         mock_alerts.return_value = 0
         mock_llm.side_effect = [
-            _specialist_response("Security", predicate="token logged"),
-            _specialist_response("Performance", predicate="n plus one query"),
+            _specialist_response(
+                "Security", predicate="token logged", file="src/api/auth.py"
+            ),
+            _specialist_response(
+                "Performance",
+                predicate="n plus one query",
+                file="src/worker/sync.py",
+            ),
             _lead_response(),
         ]
 
@@ -359,6 +396,56 @@ class TestIssuesFiledForMergedObservations:
             observation_sources=sources,
         )
 
+    def _unmerged_result_from(self, verdicts):
+        """The pre-#96 aggregation: every observation, verbatim, in order.
+
+        This is the control. Without it the merged assertions below cannot
+        tell the reader which duplicates the merge actually removed and which
+        ones `issue_manager` was already collapsing on its own.
+        """
+        observations = [o for v in verdicts for o in v.observations]
+        return ReviewResult(
+            decision="APPROVE",
+            summary="All good",
+            commit_sha="abc1234",
+            pr_url="https://github.com/o/r/pull/1",
+            model="test-model",
+            specialist_verdicts=verdicts,
+            lead_findings=[],
+            observations=observations,
+            observation_sources=[
+                (v.persona, o) for v in verdicts for o in v.observations
+            ],
+        )
+
+    @patch("vigil.issue_manager.create_issue")
+    @patch("vigil.issue_manager._fetch_all_issues")
+    @patch("vigil.issue_manager.ensure_priority_label")
+    def test_identical_key_observations_were_already_collapsed_before_the_merge(
+        self, mock_label, mock_fetch, mock_create
+    ):
+        """Control: the in-run guard already handled the shared-key case.
+
+        `create_issues_for_observations` keys its `created_by_key` guard on
+        `stable_finding_key`. Six observations that share one key therefore
+        filed one issue *before* #96 too. Asserting `call_count == 1` on the
+        merged result alone proves nothing about the merge — this test pins
+        where the credit actually belongs, so the assertion below is read as
+        "still one", not as "now one".
+        """
+        mock_label.return_value = True
+        mock_fetch.return_value = []
+        mock_create.return_value = "https://github.com/o/r/issues/1"
+
+        unmerged = self._unmerged_result_from(_six_verdicts())
+        assert len(unmerged.observations) == 6
+        create_issues_for_observations("o", "r", "token", unmerged)
+
+        assert mock_create.call_count == 1, (
+            "the pre-#96 in-run stable_finding_key guard already collapsed "
+            "observations that share a key"
+        )
+
     @patch("vigil.issue_manager.create_issue")
     @patch("vigil.issue_manager._fetch_all_issues")
     @patch("vigil.issue_manager.ensure_priority_label")
@@ -377,7 +464,10 @@ class TestIssuesFiledForMergedObservations:
         )
         assert len(issues) == 1
 
-        # The single filed issue names every specialist that raised it.
+        # What the merge adds over the control above: the review body now
+        # reports one observation rather than six, and the filed issue names
+        # every specialist that raised it instead of only the first.
+        assert len(result.observations) == 1
         persona = mock_create.call_args[0][4]
         for name in SPECIALISTS:
             assert name in persona
@@ -396,10 +486,25 @@ class TestIssuesFiledForMergedObservations:
         ]
 
         verdicts = [
-            _verdict("Security", [_obs("Token is logged", predicate="token logged")]),
+            _verdict(
+                "Security",
+                [
+                    _obs(
+                        "Token is logged",
+                        predicate="token logged",
+                        file="src/api/auth.py",
+                    )
+                ],
+            ),
             _verdict(
                 "Performance",
-                [_obs("N+1 query in the loop", predicate="n plus one query")],
+                [
+                    _obs(
+                        "N+1 query in the loop",
+                        predicate="n plus one query",
+                        file="src/worker/sync.py",
+                    )
+                ],
             ),
         ]
         result = self._result_from(verdicts)
@@ -428,3 +533,293 @@ class TestIssuesFiledForMergedObservations:
         body = _build_issue_body(result.observations[0], persona)
         assert f"**Reviewer:** {persona}" in body
         assert persona == result.observation_sources[0][0]
+
+
+# ---------- regression: the four real clusters behind #96 ----------
+
+def _cluster_verdicts(rows):
+    """rows: (persona, category, file, line, message) -> one verdict each."""
+    return [
+        _verdict(
+            persona,
+            [
+                Finding(
+                    file=file,
+                    line=line,
+                    severity=Severity.medium,
+                    category=category,
+                    message=message,
+                    suggestion=f"Fix it. — {persona}",
+                )
+            ],
+        )
+        for persona, category, file, line, message in rows
+    ]
+
+
+# relara#1032/1033/1034/1036/1037/1038 — six personas, six categories, six
+# wordings, six distinct vigil-finding-key markers, one identical location.
+_RELARA_RATE_LIMIT = [
+    ("Logic", "logic-error", "packages/api/src/middleware/rate-limit.ts", 73,
+     "The limiter's window resets on every request rather than on a fixed interval."),
+    ("Security", "input-validation", "packages/api/src/middleware/rate-limit.ts", 73,
+     "Client-supplied header is trusted when deriving the rate-limit bucket."),
+    ("Architecture", "robustness", "packages/api/src/middleware/rate-limit.ts", 73,
+     "Limiter state is held per-process, so it does not hold across instances."),
+    ("Testing", "logic-error", "packages/api/src/middleware/rate-limit.ts", 73,
+     "No coverage for the boundary where the window rolls over."),
+    ("Performance", "robustness", "packages/api/src/middleware/rate-limit.ts", 73,
+     "Every request rebuilds the bucket map instead of reusing it."),
+    ("DX", "bug-risk", "packages/api/src/middleware/rate-limit.ts", 73,
+     "The reset semantics here are surprising and undocumented."),
+]
+
+# bioqms-core#1571/1574/1580/1581/1583 — one docstring defect, five personas,
+# NO line number, and the model spelled the one file two different ways.
+_BIOQMS_AUDIT_OUTBOX = [
+    ("Security", "docs", "backend/app/services/audit_outbox.py", None,
+     "The docstring claims keys are hashed; they are not."),
+    ("DX", "clarity", "backend/app/services/audit_outbox.py", None,
+     "Docstring for _assert_stable_idempotency_keys describes the wrong contract."),
+    ("Logic", "logic-error", "backend/services/audit_outbox.py", None,
+     "The documented invariant does not match what the assertion checks."),
+    ("Architecture", "robustness", "backend/app/services/audit_outbox.py", None,
+     "Callers rely on a documented guarantee the function does not provide."),
+    ("Testing", "coverage", "backend/services/audit_outbox.py", None,
+     "Nothing asserts the documented idempotency-key property."),
+]
+
+# relara#1106/1107/1108 — one duplicated-UPDATE loop, three lines cited.
+_RELARA_OUTLOOK_SYNC = [
+    ("Logic", "performance", "packages/api/src/services/outlook-sync.ts", 415,
+     "The contact update loop executes two separate UPDATE statements per row."),
+    ("Architecture", "performance", "packages/api/src/services/outlook-sync.ts", 395,
+     "Two UPDATEs are issued where one would do, inside the per-contact loop."),
+    ("Performance", "performance", "packages/api/src/services/outlook-sync.ts", 423,
+     "Contact sync performs a second UPDATE round-trip for every record."),
+]
+
+# relara#1110/1111 — one backslash-escape defect, adjacent lines.
+_RELARA_TENANT_SCHEMA = [
+    ("Logic", "logic-error", "packages/api/src/provisioning/create-tenant-schema.ts", 136,
+     "The SQL scanner does not account for backslash-escaped quotes."),
+    ("Architecture", "robustness", "packages/api/src/provisioning/create-tenant-schema.ts", 135,
+     "Backslash escapes inside string literals are mishandled by the splitter."),
+]
+
+
+class TestRealClustersCollapseToOne:
+    """Each of these filed one issue per specialist before #96."""
+
+    def test_relara_rate_limit_six_become_one(self):
+        verdicts = _cluster_verdicts(_RELARA_RATE_LIMIT)
+        deduped, merged = merge_specialist_observations(verdicts)
+        assert len(deduped) == 1
+        assert merged[0].count == 6
+        assert len(merged[0].original_findings) == 6
+
+    def test_bioqms_audit_outbox_five_become_one_across_two_path_spellings(self):
+        """No line at all, and one file spelled two ways."""
+        verdicts = _cluster_verdicts(_BIOQMS_AUDIT_OUTBOX)
+        deduped, merged = merge_specialist_observations(verdicts)
+        assert len(deduped) == 1
+        assert merged[0].count == 5
+        cited = {f.file for f in merged[0].original_findings}
+        assert cited == {
+            "backend/app/services/audit_outbox.py",
+            "backend/services/audit_outbox.py",
+        }, "both spellings must be in the group, not just the representative's"
+
+    def test_outlook_sync_three_lines_become_one(self):
+        """395, 415 and 423: merged transitively, not by equality."""
+        deduped, merged = merge_specialist_observations(
+            _cluster_verdicts(_RELARA_OUTLOOK_SYNC)
+        )
+        assert len(deduped) == 1
+        assert merged[0].count == 3
+
+    def test_tenant_schema_adjacent_lines_become_one(self):
+        deduped, merged = merge_specialist_observations(
+            _cluster_verdicts(_RELARA_TENANT_SCHEMA)
+        )
+        assert len(deduped) == 1
+        assert merged[0].count == 2
+
+
+class TestLocationGroupingDoesNotOverMerge:
+    """The guards that keep the proximity window from swallowing the backlog."""
+
+    def _two(self, a, b):
+        deduped, _ = merge_specialist_observations(_cluster_verdicts([a, b]))
+        return len(deduped)
+
+    def test_one_shared_path_segment_is_not_enough(self):
+        """A bare basename match would fuse these; two segments must not."""
+        assert self._two(
+            ("Security", "c", "src/a/index.ts", 10, "Something about a"),
+            ("Logic", "c", "src/b/index.ts", 10, "Something else about b"),
+        ) == 2
+
+    def test_an_unlined_observation_never_absorbs_a_lined_one(self):
+        assert self._two(
+            ("Security", "c", "pkg/mod.py", 97, "Concern at a known line"),
+            ("Logic", "c", "pkg/mod.py", None, "Concern with no line at all"),
+        ) == 2
+
+    def test_lines_beyond_the_proximity_window_stay_separate(self):
+        assert self._two(
+            ("Security", "c", "pkg/mod.py", 40, "Concern near the top"),
+            ("Logic", "c", "pkg/mod.py", 400, "Unrelated concern much lower"),
+        ) == 2
+
+    def test_the_same_line_of_different_files_stays_separate(self):
+        assert self._two(
+            ("Security", "c", "pkg/one.py", 73, "Concern in one"),
+            ("Logic", "c", "pkg/two.py", 73, "Concern in two"),
+        ) == 2
+
+    def test_the_findings_path_is_not_widened(self):
+        """Findings post as inline comments; their grouping is out of scope."""
+        rows = _RELARA_RATE_LIMIT
+        verdicts = [
+            PersonaVerdict(
+                persona=persona,
+                session_id="VGL-000001",
+                decision="APPROVE",
+                checks={},
+                findings=[
+                    Finding(
+                        file=file,
+                        line=line,
+                        severity=Severity.medium,
+                        category=category,
+                        message=message,
+                        suggestion="Fix it.",
+                    )
+                ],
+                observations=[],
+            )
+            for persona, category, file, line, message in rows
+        ]
+        deduped, merged = merge_specialist_findings(verdicts)
+        assert len(deduped) == 6, "same location must NOT merge findings"
+        assert merged == []
+
+
+# ---------- nothing a specialist said may be lost ----------
+
+class TestMergedIssueKeepsEverySpecialistsText:
+
+    def _reviewed(self, rows):
+        """Drive the real reviewer so Step 3.6's wiring is what gets tested."""
+        personas = [r[0] for r in rows]
+        responses = [
+            _specialist_response(
+                persona,
+                predicate="",
+                component="",
+                file=file,
+                line=line,
+            )
+            for persona, _category, file, line, _message in rows
+        ]
+        # Replace each canned observation's message with the real cluster text.
+        rebuilt = []
+        for (persona, category, file, line, message), _ in zip(rows, responses):
+            rebuilt.append(_llm_response({
+                "decision": "APPROVE",
+                "checks": {"scan": "PASS"},
+                "findings": [],
+                "observations": [{
+                    "file": file,
+                    "line": line,
+                    "severity": "medium",
+                    "category": category,
+                    "message": message,
+                    "suggestion": f"Fix it. — {persona}",
+                }],
+            }))
+        with patch("vigil.reviewer.send_alerts_for_verdicts") as alerts, \
+                patch("vigil.reviewer._call_llm_with_retry") as llm:
+            alerts.return_value = 0
+            llm.side_effect = rebuilt + [_lead_response()]
+            return review_diff(DIFF, _pr_context(), _profile(personas))
+
+    @patch("vigil.issue_manager.create_issue")
+    @patch("vigil.issue_manager._fetch_all_issues")
+    @patch("vigil.issue_manager.ensure_priority_label")
+    def test_relara_cluster_files_one_issue_carrying_all_six_messages(
+        self, mock_label, mock_fetch, mock_create
+    ):
+        mock_label.return_value = True
+        mock_fetch.return_value = []
+        mock_create.return_value = "https://github.com/o/r/issues/1"
+
+        result = self._reviewed(_RELARA_RATE_LIMIT)
+        assert len(result.observations) == 1
+        create_issues_for_observations("o", "r", "token", result)
+        assert mock_create.call_count == 1, "six paraphrases, one issue"
+
+        persona = mock_create.call_args[0][4]
+        also = mock_create.call_args[1]["also_reported_by"]
+        body = _build_issue_body(result.observations[0], persona, also_reported_by=also)
+
+        for expected_persona, _c, _f, _l, message in _RELARA_RATE_LIMIT:
+            assert expected_persona in persona, "every specialist must be named"
+            assert message in body, (
+                f"{expected_persona}'s own words must survive the merge"
+            )
+
+    @patch("vigil.issue_manager.create_issue")
+    @patch("vigil.issue_manager._fetch_all_issues")
+    @patch("vigil.issue_manager.ensure_priority_label")
+    def test_bioqms_cluster_files_one_issue_naming_both_path_spellings(
+        self, mock_label, mock_fetch, mock_create
+    ):
+        mock_label.return_value = True
+        mock_fetch.return_value = []
+        mock_create.return_value = "https://github.com/o/r/issues/1"
+
+        result = self._reviewed(_BIOQMS_AUDIT_OUTBOX)
+        assert len(result.observations) == 1
+        create_issues_for_observations("o", "r", "token", result)
+        assert mock_create.call_count == 1
+
+        persona = mock_create.call_args[0][4]
+        also = mock_create.call_args[1]["also_reported_by"]
+        body = _build_issue_body(result.observations[0], persona, also_reported_by=also)
+
+        for expected_persona, _c, _f, _l, message in _BIOQMS_AUDIT_OUTBOX:
+            assert expected_persona in persona
+            assert message in body
+
+        # Both spellings must appear in backticks, or a later round citing the
+        # other one fails `_match_finding_to_issue`'s path check and re-files.
+        for path in (
+            "backend/app/services/audit_outbox.py",
+            "backend/services/audit_outbox.py",
+        ):
+            assert f"`{path}" in body, f"{path} must be findable in the body"
+
+    def test_merged_body_still_matches_on_the_representatives_message(self):
+        """The extra messages must not dilute the `### Finding` section.
+
+        `_match_finding_to_issue` reads that section back out and needs 0.85
+        similarity against the representative's message. If the other
+        specialists' text landed inside it, cross-run matching would break for
+        exactly the issues this merging creates, and they would slowly
+        re-duplicate over later rounds.
+        """
+        representative = Finding(
+            file="packages/api/src/middleware/rate-limit.ts",
+            line=73,
+            severity=Severity.medium,
+            category="logic-error",
+            message=_RELARA_RATE_LIMIT[0][4],
+            suggestion="Fix it.",
+        )
+        also = [(p, f, m) for p, _c, f, _l, m in _RELARA_RATE_LIMIT[1:]]
+        body = _build_issue_body(representative, "Logic + Security", also_reported_by=also)
+
+        issue = {"body": body, "html_url": "https://github.com/o/r/issues/1"}
+        assert _match_finding_to_issue(representative, [issue]) == issue["html_url"]

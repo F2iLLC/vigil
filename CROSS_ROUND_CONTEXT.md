@@ -7,7 +7,7 @@ This document describes the implementation of Issue #7 (cross-round context) and
 Vigil now prevents two common problems in multi-round reviews:
 
 1. **Cross-Round Re-flagging** — Vigil no longer re-posts findings that were already flagged in previous review rounds, even if the PR author didn't explicitly dismiss them
-2. **Cross-Specialist Spam** — When multiple specialists flag the same issue at the same location, Vigil merges them into a single comment showing which specialists flagged it. This applies to both paths: blocking *findings* become one comment, and non-blocking *observations* become one auto-filed issue (F2iLLC/vigil#96)
+2. **Cross-Specialist Spam** — When multiple specialists flag the same issue at the same location, Vigil merges them into a single comment showing which specialists flagged it. This applies to both paths, by different rules: blocking *findings* group on semantic identity, and non-blocking *observations* additionally group on the location they cite (F2iLLC/vigil#96)
 
 ## Architecture
 
@@ -58,11 +58,11 @@ Handles merging findings — and observations — flagged by multiple specialist
   - Returns: `(deduped_findings, merged_info)`
   - `deduped_findings`: List of findings with cross-specialist duplicates removed
   - `merged_info`: List of MergedFinding objects with specialist attribution
-- `merge_specialist_observations(verdicts)` — The same API for the observation path
-  (F2iLLC/vigil#96). Same grouping, same representative rule, same return shape;
-  observations are what Vigil auto-files GitHub issues from, so a defect that
-  merges as a finding must merge as an observation too or one defect becomes one
-  issue per specialist.
+- `merge_specialist_observations(verdicts)` — The observation path (F2iLLC/vigil#96).
+  Same representative rule and same return shape as the findings path, but a
+  wider grouping rule: semantic identity **or** cited location. Observations are
+  what Vigil auto-files GitHub issues from, and identity alone does not reach the
+  clusters that were being filed — see the section below.
 - `consensus_persona(specialists)` — Render the contributors of a merged item as the
   single persona string `observation_sources` and the issue body both carry
 - `format_merged_finding_comment(finding, specialists, session_ids)` — Format for display
@@ -190,12 +190,13 @@ Dangerous SQL concatenation — use parameterized queries
 
 ### Cross-Specialist Observation Deduplication (Issue #96)
 
-Observations take the same route, and it matters more there: Vigil auto-files a
-GitHub issue per surviving observation. Before #96 only the findings path was
-merged, so six specialists describing one defect in six different sentences
-produced six different `stable_finding_key` values (the key falls back to the
-message's content words when the model emits no structured `predicate`), and the
-in-run guard in `issue_manager` filed six near-identical issues for one defect.
+Observations take a wider route, and it matters more there: Vigil auto-files a
+GitHub issue per surviving observation. Before #96 the observation path was not
+merged at all, so six specialists describing one defect in six different
+sentences produced six different `stable_finding_key` values (the key falls back
+to the message's content words when the model emits no structured `predicate`),
+and the in-run guard in `issue_manager` — which keys on that same function —
+filed six near-identical issues for one defect.
 
 ```
 merge_specialist_observations([security_verdict, logic_verdict, ...])
@@ -211,9 +212,65 @@ merge_specialist_observations([security_verdict, logic_verdict, ...])
 **Reviewer:** Security + Logic + Performance
 ```
 
-Grouping uses the same `stable_finding_key` identity as the findings path, so
-two genuinely different defects are never collapsed — only what would already
-have merged as a finding merges as an observation.
+### Why identity alone was not enough
+
+Grouping on `stable_finding_key` would have changed nothing. That key is
+`sha256(component + predicate)`, and it is the same function the in-run
+`created_by_key` guard in `create_issues_for_observations` already uses — so
+observations it merges were already being filed as one issue, and observations
+it does not merge are still filed separately. The six relara issues carry six
+**different** `vigil-finding-key` markers.
+
+A similarity threshold cannot substitute either. Measured over the fixtures in
+`tests/test_observation_dedup.py`, the pairwise `SequenceMatcher` ratio between
+six wordings of one defect (0.17–0.47) and between genuinely different defects
+(0.18–0.37) overlap almost completely.
+
+What identifies these clusters is the place they point at.
+
+### The location rule
+
+Two observations share a location when **both** hold:
+
+- **Path** — the last two segments agree. One segment would fuse
+  `src/a/index.ts` with `src/b/index.ts`; two absorbs a model that spelled one
+  file both `backend/app/services/audit_outbox.py` and
+  `backend/services/audit_outbox.py`.
+- **Line** — either both cite no line, or their ranges overlap within
+  `_OBSERVATION_LINE_PROXIMITY = 25` lines. An unlined observation never absorbs
+  a lined one.
+
+Grouping is transitive within the round, which is deliberate: 395 is within
+range of 415 and 415 of 423, so all three merge.
+
+Measured clusters, all of which now collapse to one issue:
+
+| Cluster | Personas | Shape | Grouped by |
+|---|---|---|---|
+| relara#1032-1038 | 6 | identical line 73 | same path + overlapping range |
+| bioqms-core#1571-1583 | 5 | no line, two path spellings | same 2-segment path tail, both unlined |
+| relara#1106-1108 | 3 | lines 395 / 415 / 423 | overlapping ranges, transitively |
+| relara#1110-1111 | 2 | lines 135 / 136 | overlapping ranges |
+
+### The trade-off
+
+Grouping by place **can** collapse two genuinely different concerns about one
+place — most easily two observations in one file that named no line. This is
+accepted, and it is accepted only because nothing is discarded: every
+contributing specialist's message is carried into the filed issue via
+`ReviewResult.observation_consensus` and rendered under `### Also reported by`,
+attributed by persona. An issue holding two concerns under one heading can be
+split by a reader; a dropped specialist message cannot be recovered. Message
+preservation is the safety property here — not non-collapse.
+
+Those messages go in their own `###` section after `### Finding` and
+`### Suggestion`, never inside them: `_match_finding_to_issue` reads the Finding
+section back out and requires 0.85 similarity against the representative's
+message, so diluting it would break cross-run matching for exactly the issues
+this merging creates.
+
+The **findings** path is unchanged and still groups on identity alone. Findings
+post as inline comments, where a per-specialist voice is cheap.
 
 ## Finding Fingerprint Details
 
@@ -356,8 +413,12 @@ Tests for cross-specialist merging:
 
 ### `tests/test_observation_dedup.py`
 Tests for cross-specialist merging on the observation path (#96):
-- Six specialists, one defect, one surviving observation and one issue
-- Genuinely different defects are never collapsed
+- All four real clusters (relara#1032-1038, bioqms-core#1571-1583, relara#1106-1108,
+  relara#1110-1111) collapse to one issue at their real paths and line numbers
+- Every contributing specialist's message survives into the issue body
+- Over-merge guards: different files, one shared path segment, lined vs unlined,
+  and lines 40 vs 400 of one file all stay separate
+- A merged body still matches `_match_finding_to_issue` on the representative's message
 - The representative is the highest-severity member of the group
 - Every contributing specialist stays recoverable, in the source and in the issue
 

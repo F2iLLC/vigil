@@ -127,6 +127,18 @@ def _normalize_line_range(line: int | None, context_lines: int = 2) -> tuple[int
     return (start, end)
 
 
+def normalize_line_range(
+    line: int | None, context_lines: int = 2
+) -> tuple[int, int]:
+    """Public view of the shared line-range notion.
+
+    ``cross_specialist_dedup`` needs the same "which lines is this finding
+    about" answer that fingerprinting uses, and re-deriving it there would let
+    the two drift. Exposed rather than reached into so there is one definition.
+    """
+    return _normalize_line_range(line, context_lines)
+
+
 def _line_ranges_overlap(
     range1: tuple[int, int], range2: tuple[int, int]
 ) -> bool:
