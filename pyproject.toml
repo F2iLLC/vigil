@@ -43,3 +43,9 @@ packages = ["src/vigil"]
 
 [tool.pytest.ini_options]
 asyncio_default_fixture_loop_scope = "function"
+# The suite imports `vigil` directly, so a clean checkout could only run it
+# with PYTHONPATH=src exported by hand. CI never hit this because it does an
+# editable `pip install -e ".[dev]"` first, which resolves `vigil` to this
+# same `src/` tree, so this changes what a bare `pytest -q` can do locally
+# without changing which files CI exercises.
+pythonpath = ["src"]
