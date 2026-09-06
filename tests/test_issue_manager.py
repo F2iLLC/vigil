@@ -8,11 +8,13 @@ from vigil.issue_manager import (
     _build_issue_title,
     _fetch_all_issues,
     _match_finding_to_issue,
+    _NOT_ON_DEFAULT_BRANCH_MARKER,
     _VIGIL_ISSUE_MARKER,
     create_issue,
     create_issues_for_observations,
     ensure_priority_label,
     find_existing_issue,
+    missing_from_default_branch,
     priority_label_for,
 )
 from vigil.models import Finding, PersonaVerdict, ReviewResult, Severity
@@ -458,3 +460,158 @@ class TestCreateIssuesForObservations:
 
         # Issues should be fetched exactly ONCE regardless of observation count
         mock_fetch.assert_called_once()
+
+
+# ---------- default-branch annotation (F2iLLC/vigil#97) ----------
+
+class TestMissingFromDefaultBranch:
+    """The probe answers only on positive evidence of absence.
+
+    A wrong annotation tells a reviewer that shipped code does not exist; a
+    missing one costs one `git ls-tree`. So every uncertain path returns "".
+    """
+
+    @patch("vigil.issue_manager.get_file_content_at_commit")
+    @patch("vigil.issue_manager.get_default_branch")
+    def test_absent_path_returns_branch_name(self, mock_branch, mock_content):
+        mock_branch.return_value = "main"
+        mock_content.return_value = None  # 404 at the default branch
+
+        assert missing_from_default_branch("o", "r", "t", "new.py", {}) == "main"
+        mock_content.assert_called_once_with("o", "r", "new.py", "main", "t")
+
+    @patch("vigil.issue_manager.get_file_content_at_commit")
+    @patch("vigil.issue_manager.get_default_branch")
+    def test_present_path_returns_empty(self, mock_branch, mock_content):
+        mock_branch.return_value = "main"
+        mock_content.return_value = "print('hi')\n"
+
+        assert missing_from_default_branch("o", "r", "t", "old.py", {}) == ""
+
+    @patch("vigil.issue_manager.get_file_content_at_commit")
+    @patch("vigil.issue_manager.get_default_branch")
+    def test_unreadable_repo_says_nothing(self, mock_branch, mock_content):
+        """A repo lookup that fails is not evidence the file is missing."""
+        mock_branch.side_effect = RuntimeError("401")
+
+        assert missing_from_default_branch("o", "r", "t", "new.py", {}) == ""
+        mock_content.assert_not_called()
+
+    @patch("vigil.issue_manager.get_file_content_at_commit")
+    @patch("vigil.issue_manager.get_default_branch")
+    def test_content_api_failure_says_nothing(self, mock_branch, mock_content):
+        mock_branch.return_value = "main"
+        mock_content.side_effect = RuntimeError("502")
+
+        assert missing_from_default_branch("o", "r", "t", "new.py", {}) == ""
+
+    @patch("vigil.issue_manager.get_file_content_at_commit")
+    @patch("vigil.issue_manager.get_default_branch")
+    def test_empty_path_never_probes(self, mock_branch, mock_content):
+        assert missing_from_default_branch("o", "r", "t", "", {}) == ""
+        mock_branch.assert_not_called()
+        mock_content.assert_not_called()
+
+    @patch("vigil.issue_manager.get_file_content_at_commit")
+    @patch("vigil.issue_manager.get_default_branch")
+    def test_cache_collapses_repeat_lookups(self, mock_branch, mock_content):
+        """One API call per distinct path, and one repo lookup per run."""
+        mock_branch.return_value = "main"
+        mock_content.return_value = None
+        cache: dict[str, str] = {}
+
+        for _ in range(3):
+            missing_from_default_branch("o", "r", "t", "new.py", cache)
+        missing_from_default_branch("o", "r", "t", "other.py", cache)
+
+        mock_branch.assert_called_once()
+        assert mock_content.call_count == 2
+
+
+class TestNotOnDefaultBranchAnnotation:
+
+    def test_body_carries_the_notice_and_marker(self):
+        body = _build_issue_body(
+            _make_finding(file="src/new.py", line=42),
+            "Security",
+            pr_url="https://github.com/o/r/pull/7",
+            absent_from_branch="main",
+        )
+        assert _NOT_ON_DEFAULT_BRANCH_MARKER in body
+        assert "`src/new.py` did not exist on the default branch (`main`)" in body
+        assert "https://github.com/o/r/pull/7" in body
+
+    def test_notice_absent_by_default(self):
+        body = _build_issue_body(_make_finding(), "Security")
+        assert _NOT_ON_DEFAULT_BRANCH_MARKER not in body
+        assert "did not exist on the default branch" not in body
+
+    def test_notice_precedes_the_finding_section(self):
+        """It must not land inside `### Finding` — dedup reads that section back."""
+        body = _build_issue_body(
+            _make_finding(), "Security", absent_from_branch="main",
+        )
+        assert body.index(_NOT_ON_DEFAULT_BRANCH_MARKER) < body.index("### Finding")
+
+    def test_annotated_body_still_matches_on_a_later_round(self):
+        """The notice must not break cross-run dedup for these very issues."""
+        finding = _make_finding()
+        body = _build_issue_body(finding, "Security", absent_from_branch="main")
+        issue = {"html_url": "https://github.com/o/r/issues/9", "body": body}
+
+        assert _match_finding_to_issue(finding, [issue]) == \
+            "https://github.com/o/r/issues/9"
+
+    @patch("vigil.issue_manager.create_issue")
+    @patch("vigil.issue_manager._fetch_all_issues")
+    @patch("vigil.issue_manager.ensure_priority_label")
+    def test_creation_passes_the_probe_result_through(
+        self, mock_label, mock_fetch, mock_create, monkeypatch,
+    ):
+        mock_label.return_value = True
+        mock_fetch.return_value = []
+        mock_create.return_value = "https://github.com/o/r/issues/1"
+        monkeypatch.setattr(
+            "vigil.issue_manager.missing_from_default_branch",
+            lambda owner, repo, token, path, cache: "main" if path == "new.py" else "",
+        )
+
+        obs_new = _make_finding(file="new.py", message="Issue A")
+        obs_old = _make_finding(file="old.py", message="Issue B")
+        verdict = PersonaVerdict(
+            persona="Logic", decision="APPROVE",
+            checks={}, findings=[], observations=[obs_new, obs_old],
+        )
+        create_issues_for_observations(
+            "o", "r", "token",
+            _make_result(observations=[obs_new, obs_old], verdicts=[verdict]),
+        )
+
+        branches = [
+            call.kwargs["absent_from_branch"] for call in mock_create.call_args_list
+        ]
+        assert branches == ["main", ""]
+
+    @patch("vigil.issue_manager.create_issue")
+    @patch("vigil.issue_manager._fetch_all_issues")
+    @patch("vigil.issue_manager.ensure_priority_label")
+    def test_deduplicated_observation_is_never_probed(
+        self, mock_label, mock_fetch, mock_create, monkeypatch,
+    ):
+        """An observation that matches an open issue costs no extra API calls."""
+        mock_label.return_value = True
+        mock_fetch.return_value = [
+            _make_vigil_issue(message="Shared counter accessed without a lock")
+        ]
+        probed: list[str] = []
+        monkeypatch.setattr(
+            "vigil.issue_manager.missing_from_default_branch",
+            lambda owner, repo, token, path, cache: probed.append(path) or "",
+        )
+
+        create_issues_for_observations(
+            "o", "r", "token", _make_result(observations=[_make_finding()]),
+        )
+
+        assert probed == []
+        mock_create.assert_not_called()

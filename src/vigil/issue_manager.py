@@ -12,6 +12,7 @@ import httpx
 
 from .models import Finding, ReviewResult, Severity
 from .context_manager import stable_finding_key
+from .github import get_default_branch, get_file_content_at_commit
 from .utils import extract_message_content, github_headers, severity_emoji
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,16 @@ _PRIORITY_LABELS: dict[Severity, tuple[str, str, str]] = {
 # Marker in issue body to identify Vigil-created issues
 _VIGIL_ISSUE_MARKER = "<!-- vigil-observation -->"
 _FINDING_KEY_PATTERN = re.compile(r"<!--\s*vigil-finding-key:\s*([a-f0-9]{24})\s*-->")
+
+# Marker for an issue whose cited path was absent from the default branch when
+# it was filed. Machine-readable so a triage pass can select these without
+# parsing prose, and stable independently of the wording around it.
+_NOT_ON_DEFAULT_BRANCH_MARKER = "<!-- vigil-not-on-default-branch -->"
+
+# Where ``missing_from_default_branch`` memoizes the resolved default branch
+# inside its per-path cache. A NUL byte cannot appear in a path, so this can
+# never collide with one.
+_BRANCH_CACHE_KEY = "\x00default-branch"
 
 
 def priority_label_for(finding: Finding) -> str:
@@ -60,6 +71,63 @@ def ensure_priority_label(owner: str, repo: str, token: str, severity: Severity)
         return False
 
 
+def missing_from_default_branch(
+    owner: str,
+    repo: str,
+    token: str,
+    path: str,
+    cache: dict[str, str],
+) -> str:
+    """Return the default branch's name when ``path`` is absent from it, else ``""``.
+
+    Observations are filed from a PR branch, but they land in the repository's
+    backlog, where nothing records which tree state they were anchored to. A
+    file that exists only on an unmerged branch therefore produces an issue
+    citing a path that ``git ls-tree origin/main`` cannot resolve, and the body
+    gives no hint of that (F2iLLC/vigil#97 — eight such issues from one
+    bioqms-core PR review). This is the probe that lets the body say so.
+
+    Answers only on **positive** evidence of absence. An unreachable
+    repository, an unnamed default branch, or any API failure other than a 404
+    for the path itself returns ``""``, i.e. "say nothing". The asymmetry is
+    the same one ``finding_validation`` is built on and for the same reason:
+    a missing annotation costs a triage pass one ``git ls-tree``, whereas a
+    wrong one tells a reviewer that shipped code does not exist.
+
+    ``cache`` is caller-owned and maps a path to this function's answer for it,
+    so one review pays at most one API call per distinct cited path. It also
+    carries the resolved branch name under :data:`_BRANCH_CACHE_KEY`, so the
+    repository lookup happens once — and, because probing is lazy, not at all
+    when every observation deduplicates against an existing issue.
+    """
+    if not path:
+        return ""
+    if path in cache:
+        return cache[path]
+
+    if _BRANCH_CACHE_KEY not in cache:
+        try:
+            cache[_BRANCH_CACHE_KEY] = get_default_branch(owner, repo, token)
+        except Exception as e:
+            log.warning("Could not resolve default branch, skipping annotation: %s", e)
+            cache[_BRANCH_CACHE_KEY] = ""
+    branch = cache[_BRANCH_CACHE_KEY]
+    if not branch:
+        return ""
+
+    try:
+        # A 404 here is attributable to the path: the default-branch lookup
+        # above already succeeded, which proves the token can see this repo.
+        absent = get_file_content_at_commit(owner, repo, path, branch, token) is None
+    except Exception as e:
+        log.warning("Could not check %s against %s, skipping annotation: %s", path, branch, e)
+        cache[path] = ""
+        return ""
+
+    cache[path] = branch if absent else ""
+    return cache[path]
+
+
 def _build_issue_title(finding: Finding, persona: str) -> str:
     """Build a concise issue title."""
     msg = finding.message
@@ -75,8 +143,21 @@ def _build_issue_body(
     pr_url: str = "",
     commit_sha: str = "",
     also_reported_by: list[tuple[str, str, str]] | None = None,
+    absent_from_branch: str = "",
 ) -> str:
     """Build the GitHub issue body with full finding details.
+
+    ``absent_from_branch`` is the default branch's name when the cited path
+    does not resolve there, and ``""`` otherwise (including when that could not
+    be determined — see :func:`missing_from_default_branch`). When set, the
+    body says so up front. Without it the issue is indistinguishable from one
+    describing shipped code, and the only way to tell them apart is to run
+    ``git ls-tree`` against the default branch per issue — which is what
+    F2iLLC/vigil#97 was filed about.
+
+    The notice goes above ``### Finding`` for two reasons: it is the first
+    thing a triage pass needs, and :func:`_match_finding_to_issue` reads that
+    section back out for cross-run matching, so nothing may be added inside it.
 
     ``also_reported_by`` carries ``(persona, file, message)`` for the other
     specialists whose observations merged into this one. Rendering them is not
@@ -108,6 +189,20 @@ def _build_issue_body(
         sections.append(f"**PR:** {pr_url}")
     if commit_sha:
         sections.append(f"**Commit:** `{commit_sha[:7]}`")
+
+    if absent_from_branch:
+        pr_ref = pr_url or "the reviewed pull request"
+        sections.append(
+            f"\n{_NOT_ON_DEFAULT_BRANCH_MARKER}\n"
+            f"> [!IMPORTANT]\n"
+            f"> **Not on `{absent_from_branch}`.** `{finding.file}` did not exist on the "
+            f"default branch (`{absent_from_branch}`) when this issue was filed — it is "
+            f"only on the branch reviewed in {pr_ref}, and the line number above resolves "
+            f"against the reviewed commit, not against `{absent_from_branch}`.\n"
+            f">\n"
+            f"> Triage this against that PR, not as backlog. If the PR never merges, this "
+            f"issue describes code that will never exist and should be closed unread."
+        )
 
     sections.append(f"\n### Finding\n\n{finding.message}")
 
@@ -254,10 +349,14 @@ def create_issue(
     pr_url: str = "",
     commit_sha: str = "",
     also_reported_by: list[tuple[str, str, str]] | None = None,
+    absent_from_branch: str = "",
 ) -> str | None:
     """Create a GitHub issue for a finding. Returns the issue HTML URL or None on failure."""
     title = _build_issue_title(finding, persona)
-    body = _build_issue_body(finding, persona, pr_url, commit_sha, also_reported_by)
+    body = _build_issue_body(
+        finding, persona, pr_url, commit_sha, also_reported_by,
+        absent_from_branch=absent_from_branch,
+    )
 
     url = f"https://api.github.com/repos/{owner}/{repo}/issues"
     try:
@@ -292,6 +391,12 @@ def create_issues_for_observations(
     Pre-fetches all existing open issues once to avoid N+1 API calls,
     then deduplicates each observation against the cache before creating.
     Groups observations with their source persona from specialist verdicts.
+
+    An observation whose cited path does not resolve on the repository's
+    default branch is filed with that fact stated in its body, so a triage
+    pass can see in one read that the issue describes code which has not
+    shipped (F2iLLC/vigil#97). See :func:`missing_from_default_branch` for
+    when that check answers and when it stays silent.
 
     Args:
         owner: Repository owner.
@@ -332,6 +437,11 @@ def create_issues_for_observations(
         if consensus.also_reported_by
     }
 
+    # Default-branch answers for the paths this run actually files, memoized
+    # across observations. Populated lazily, so a run whose observations all
+    # deduplicate makes no extra API calls at all.
+    default_branch_cache: dict[str, str] = {}
+
     issues: list[tuple[Finding, str]] = []
     created_by_key: dict[str, str] = {}
     for obs in result.observations:
@@ -356,6 +466,9 @@ def create_issues_for_observations(
             pr_url=pr_url,
             commit_sha=result.commit_sha,
             also_reported_by=also_reported_map.get(id(obs)),
+            absent_from_branch=missing_from_default_branch(
+                owner, repo, token, obs.file, default_branch_cache,
+            ),
         )
         if issue_url:
             issues.append((obs, issue_url))
