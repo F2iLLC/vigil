@@ -422,6 +422,7 @@ Your domain:
 - Config hygiene: env vars documented, prefixed, no hardcoded values
 - Twelve-factor alignment: config via env, stateless processes, disposability
 - Package structure: exports, tsconfig, build scripts
+- On a markdown-only PR: evaluate specification/design documents for structural and module-boundary consistency, the same way you would evaluate code.
 
 Do NOT evaluate: security, GxP compliance, schema design, test coverage, CI signals, commits.
 
@@ -431,7 +432,8 @@ Do NOT evaluate: security, GxP compliance, schema design, test coverage, CI sign
                     "**/package.json", "**/tsconfig*", "**/pyproject.toml",
                     "*.yml", "*.yaml", "*.toml", "*.json", "*.env*",
                     "**/src/**", "**/lib/**", "**/packages/**",
-                    "!*.test.*", "!*.spec.*", "!*.sql", "!*.css", "!*.scss", "!*.md"],
+                    "*.md", "*.mdx",
+                    "!*.test.*", "!*.spec.*", "!*.sql", "!*.css", "!*.scss"],
 )
 
 _ENTERPRISE_SECURITY = Persona(
@@ -448,6 +450,7 @@ Your domain:
 - Tenant isolation: cross-tenant data access prevented, tenantId scoping at data layer
 - Dependency security: new deps checked for CVEs, minimal surface preferred
 - Error leakage: no stack traces, internal paths, or SQL errors exposed to clients
+- On a specification document: flag auth/trust-boundary or tenant-isolation claims that are described incorrectly or ambiguously, not just implemented incorrectly.
 
 Do NOT evaluate: module boundaries, GxP compliance, schema design, test coverage, CI signals.
 
@@ -457,7 +460,8 @@ Do NOT evaluate: module boundaries, GxP compliance, schema design, test coverage
                     *SCRIPT_PATTERNS,
                     "*auth*", "*secret*", "*token*", "*crypto*", "*middleware*",
                     "*guard*", "*policy*", "*permission*", "*tenant*",
-                    "!*.test.*", "!*.spec.*", "!*.md", "!*.css", "!*.scss"],
+                    "*.md",
+                    "!*.test.*", "!*.spec.*", "!*.css", "!*.scss"],
     blocking=False,
     alert=True,
 )
@@ -593,7 +597,9 @@ Your domain:
 - SAVEPOINT isolation: audit writes isolated so failures don't corrupt caller transactions
 - Field completeness: required GxP fields present (actorId, actorRole, action, entityType, entityId, tenantId, traceId)
 
-Only evaluate this PR if it touches audit trails, regulated records, or compliance-related code.
+Only evaluate this PR if it touches audit trails, regulated records, or compliance-related code —
+this scope also includes GxP-controlled specification, design, or change-impact documents (e.g. a
+project's designated controlled-documents markdown), not just the code implementing those trails.
 If no GxP-relevant changes are present, return APPROVE with empty findings.
 
 Do NOT evaluate: module boundaries, application security, schema design, test coverage, CI signals.
@@ -601,7 +607,7 @@ Do NOT evaluate: module boundaries, application security, schema design, test co
 {VERDICT_SCHEMA}""",
     file_patterns=["*audit*", "*compliance*", "*gxp*", "*signature*", "*esign*",
                     "*trail*", "*immutable*", "*regulated*", "*cfr*", "*alcoa*",
-                    "*.sql", "*migration*"],
+                    "*.sql", "*migration*", "*.md", "*.mdx"],
 )
 
 # ---------------------------------------------------------------------------
