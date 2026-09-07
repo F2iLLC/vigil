@@ -288,7 +288,8 @@ With `--post`, non-blocking observations can become GitHub issues:
 1. Model-generated observations must include a concrete, non-null suggestion. Compliments, descriptions, and no-action notes are discarded.
 2. Vigil ensures a priority label exists for the observation severity: `Critical Priority`, `High Priority`, `Medium Priority`, or `Low Priority`.
 3. Open Vigil-created issues are checked for the same file and a sufficiently similar message before a new issue is created.
-4. The final review links each tracked observation to its issue.
+4. An observation whose cited path does not exist on the repository's default branch is filed with that stated in the issue body, naming the PR whose branch the code is on. Observations are made against a PR branch but filed into the repository's backlog, so without this an issue about code that has not shipped is indistinguishable from one about code that has ([F2iLLC/vigil#97](https://github.com/F2iLLC/vigil/issues/97)). The check answers only on positive evidence: if the default branch or the path cannot be resolved, the issue is filed with no such claim.
+5. The final review links each tracked observation to its issue.
 
 Security is non-blocking in both built-in profiles. Its findings become observations and do not change the overall review decision, but they can still be tracked and alerted.
 

@@ -18,7 +18,7 @@ real implementation and stubbing the blob fetch instead. A test's own
 
 import pytest
 
-from vigil import github_review
+from vigil import github_review, issue_manager
 
 
 @pytest.fixture(autouse=True)
@@ -28,4 +28,27 @@ def stub_head_content_validation(monkeypatch):
         github_review,
         "validate_findings_against_head",
         lambda findings, *args, **kwargs: (list(findings), []),
+    )
+
+
+@pytest.fixture(autouse=True)
+def stub_default_branch_probe(monkeypatch):
+    """Keep the network out of every ``create_issues_for_observations`` call.
+
+    Same reasoning and same shape as the head-content stub above: the
+    default-branch check added for F2iLLC/vigil#97 runs inside issue creation
+    and is real network I/O against the GitHub repository and contents APIs.
+    The stub is this feature's identity — "nothing is known to be absent" —
+    i.e. exactly the pre-#97 issue body every existing test was written
+    against.
+
+    ``tests/test_issue_manager.py`` opts back in explicitly, either by calling
+    ``missing_from_default_branch`` directly with its two API calls patched, or
+    by re-patching this name. A test's own ``monkeypatch.setattr`` runs after
+    this fixture, so it wins.
+    """
+    monkeypatch.setattr(
+        issue_manager,
+        "missing_from_default_branch",
+        lambda *args, **kwargs: "",
     )

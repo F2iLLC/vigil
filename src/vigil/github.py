@@ -189,6 +189,32 @@ def get_file_content_at_commit(
         return resp.text
 
 
+def get_default_branch(owner: str, repo: str, token: str) -> str:
+    """Return the repository's default branch name.
+
+    Raises on any failure, so a caller can tell "this repository calls its
+    default branch `main`" apart from "GitHub would not say". That distinction
+    matters wherever absence from the default branch is treated as evidence
+    (F2iLLC/vigil#97): a successful answer here also proves the token can read
+    this repository at all, which is what makes a later 404 from
+    ``get_file_content_at_commit`` attributable to the *path* rather than to
+    the credentials — the same corroboration ``commit_is_readable`` provides
+    for the head-content guard.
+    """
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"Bearer {token}",
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}"
+    # Redirects are followed for the same reason as the probes above and
+    # below: a renamed repository answers 301, and an unfollowed 301 reaches
+    # ``raise_for_status`` as an error.
+    with httpx.Client(follow_redirects=True) as client:
+        resp = client.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        return resp.json().get("default_branch") or ""
+
+
 def commit_is_readable(owner: str, repo: str, sha: str, token: str) -> bool:
     """Return True when this token can read ``sha`` in this repository.
 
