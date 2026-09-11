@@ -19,6 +19,12 @@ permissions:
 
 jobs:
   vigil:
+    # KILL SWITCH: set the Actions variable VIGIL_SKIP=true (`gh variable set
+    # VIGIL_SKIP -b true`) to skip Vigil on this repo without editing the
+    # workflow; unset it to resume. The reusable workflow's checks are not
+    # required status checks, so skipping them blocks nothing, but any required
+    # approval must then come from a human reviewer.
+    if: vars.VIGIL_SKIP != 'true'
     uses: ./.github/workflows/reusable-vigil.yml
     with:
       runner-json: '["self-hosted","linux","x64","ci-general"]'
