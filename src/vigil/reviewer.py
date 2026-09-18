@@ -311,6 +311,28 @@ def _resolve_external_context(
         return None
 
 
+def _route_findings_by_priority(verdict: PersonaVerdict) -> int:
+    """Apply the F2iLLC P-scale to a specialist verdict, in place.
+
+    Owner ruling 2026-09-18 (LunaOS ``skills/address-comments/PRIORITY.md``):
+    P0/P1 findings are fixed in the surfacing PR; P2/P3 are filed as
+    prioritised issues and are not addressed there. In Vigil terms, a
+    medium/low *finding* is re-routed to ``observations`` — which the issue
+    manager turns into a ``Medium Priority``/``Low Priority`` issue — and the
+    verdict only stays REQUEST_CHANGES while a critical/high finding remains.
+    """
+    blocking = [f for f in verdict.findings if f.severity.blocks_review]
+    filed = [f for f in verdict.findings if not f.severity.blocks_review]
+    if filed:
+        verdict.observations = filed + verdict.observations
+        verdict.findings = blocking
+    # Downgrade only when the objection demonstrably rested on filed findings;
+    # a REQUEST_CHANGES that names no finding at all is left standing.
+    if filed and verdict.decision == "REQUEST_CHANGES" and not blocking:
+        verdict.decision = "APPROVE"
+    return len(filed)
+
+
 def _run_specialist(persona: Persona, pr_block: str, model: str, delay: float = 0) -> PersonaVerdict:
     """Run a single specialist review. Called in parallel."""
     if delay > 0:
@@ -501,6 +523,10 @@ def review_diff(
     # --- Step 1: Sequential specialist reviews ---
     # Each specialist gets only the files matching their patterns
     verdicts: list[PersonaVerdict] = []
+    # P2/P3 findings re-routed to observations across all specialists; used
+    # in Step 2.7 to tell "the lead objected to filed findings" apart from
+    # "the lead objected with no findings at all".
+    specialist_filed_count = 0
 
     for persona in profile.specialists:
         # Filter diff to this specialist's domain
@@ -576,6 +602,13 @@ def review_diff(
                 verdict.observations = verdict.findings + verdict.observations
                 verdict.findings = []
                 verdict.decision = "APPROVE"
+
+            # P-scale routing (owner ruling 2026-09-18): only P0/P1
+            # (critical/high) findings are fixed in the surfacing PR. P2/P3
+            # (medium/low) are filed as prioritised issues and move on, so
+            # they leave the blocking list here regardless of what the model
+            # decided. A verdict with no blocking findings left is APPROVE.
+            specialist_filed_count += _route_findings_by_priority(verdict)
 
             verdicts.append(verdict)
             if on_specialist_done:
@@ -749,6 +782,23 @@ def review_diff(
         import logging
         logging.getLogger(__name__).debug("Cross-specialist dedup failed: %s", e)
 
+    # --- Step 2.7: P-scale routing for the lead's own findings ---
+    # Same rule the specialists got in _route_findings_by_priority: a P2/P3
+    # lead finding (including a merged cross-specialist one) is filed as an
+    # issue, not fixed in this PR, so it leaves the blocking list. The lead's
+    # REQUEST_CHANGES is downgraded only when it demonstrably rested on filed
+    # findings alone — findings existed and none of them blocks. A blocking
+    # lead verdict with no findings at all is left standing (fail closed).
+    lead_filed = [f for f in lead_findings if not f.severity.blocks_review]
+    lead_findings = [f for f in lead_findings if f.severity.blocks_review]
+    any_blocking = bool(lead_findings) or any(
+        f.severity.blocks_review for v in verdicts for f in v.findings
+    )
+    any_finding_existed = (
+        bool(lead_filed) or specialist_filed_count > 0 or any(v.findings for v in verdicts)
+    )
+    if decision == "REQUEST_CHANGES" and any_finding_existed and not any_blocking:
+        decision = "APPROVE"
 
     # --- Step 3: Aggregate observations with persona tracking ---
     all_observations: list[Finding] = []
@@ -757,7 +807,6 @@ def review_diff(
         for obs in v.observations:
             all_observations.append(obs)
             observation_sources.append((v.persona, obs))
-
     # --- Step 3.6: Cross-specialist observation deduplication (#96) ---
     #
     # Step 3.5 above merges duplicate *findings* across specialists. The
@@ -841,6 +890,13 @@ def review_diff(
         logging.getLogger(__name__).debug(
             "Cross-specialist observation dedup failed: %s", e
         )
+
+    # Lead findings filed under the P-scale (Step 2.7) join the issue queue
+    # after specialist dedup: the lead already saw every specialist verdict,
+    # so a lead P2/P3 is by construction not a restatement of one of theirs.
+    for obs in lead_filed:
+        all_observations.append(obs)
+        observation_sources.append(("Lead", obs))
 
     return ReviewResult(
         decision=decision,

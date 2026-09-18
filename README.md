@@ -281,6 +281,19 @@ Contract:
 
 When multiple specialists report the same file/category/message concern at overlapping lines, Vigil emits one finding and includes a consensus table showing which specialists raised it and their verdicts.
 
+## Priority scale (P0–P4)
+
+Every finding is scored on the F2iLLC P-scale (owner ruling 2026-09-18; the fleet definition lives in LunaOS `skills/address-comments/PRIORITY.md`). Vigil derives the score from severity and renders it on every surface — the review body, inline comments, the `vigil-meta` JSON (`"priority"`), and issue headings:
+
+| Severity | Score | Disposition |
+| --- | --- | --- |
+| `critical` | **P0** | Fixed in the surfacing PR; blocks. |
+| `high` | **P1** | Fixed in the surfacing PR; blocks. |
+| `medium` | **P2** | Filed as a `Medium Priority` issue; does **not** block. |
+| `low` | **P3** | Filed as a `Low Priority` issue; does **not** block. |
+
+A `medium`/`low` *finding* — from a specialist or from the lead — is therefore re-routed to observations before posting, so it becomes a labelled issue instead of an inline blocking thread, and a `REQUEST_CHANGES` that rested only on such findings becomes `APPROVE`. A blocking verdict that names no finding at all is left standing (fail closed). Vigil has no P4 tier: an observation not worth an issue is dropped by the persona prompt's signal-to-noise rules rather than recorded.
+
 ## Observations and automatic issues
 
 With `--post`, non-blocking observations can become GitHub issues:

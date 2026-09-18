@@ -120,6 +120,21 @@ __FINDING_EVIDENCE_FIELDS__
 Rules:
 - If you have no findings, return "decision": "APPROVE" with empty findings list.
 - Only return REQUEST_CHANGES if there are high or critical severity findings.
+- Severity is the F2iLLC P-scale (every reviewer in the fleet scores on it):
+    critical = P0 — must never merge: data loss/corruption, a security hole,
+               broken main/CI for everyone, a wrong regulated record, an outage path.
+    high     = P1 — a real functional defect in what this PR changes or claims:
+               wrong behavior on the normal path, a violated contract, a test
+               that should fail but passes.
+    medium   = P2 — a real defect with bounded blast radius: an edge case, an
+               uncommon input, an unusual-timing race, a pre-existing defect the
+               diff makes visible.
+    low      = P3 — robustness, maintainability, clarity or coverage where the
+               current behavior is not incorrect.
+  Only critical/high (P0/P1) block the PR. Medium/low (P2/P3) findings are
+  filed as prioritised issues and NOT fixed in this PR, so score honestly:
+  inflating a P2 to P1 to force a fix wears the team down; deflating a P1 to
+  P2 ships a defect. Fix cost never changes the score.
 - Be specific: file paths, line numbers, concrete suggestions.
 - Observations without a concrete action are invalid and will be discarded.
 

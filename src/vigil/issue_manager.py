@@ -18,10 +18,10 @@ from .utils import extract_message_content, github_headers, severity_emoji
 log = logging.getLogger(__name__)
 
 _PRIORITY_LABELS: dict[Severity, tuple[str, str, str]] = {
-    Severity.critical: ("Critical Priority", "b60205", "Requires immediate attention"),
-    Severity.high: ("High Priority", "d93f0b", "Requires prompt attention"),
-    Severity.medium: ("Medium Priority", "fbca04", "Important, but not urgent"),
-    Severity.low: ("Low Priority", "0e8a16", "Useful follow-up when capacity allows"),
+    Severity.critical: ("Critical Priority", "b60205", "P0 review finding — fix in the surfacing PR; if too large, tracked here and escalated"),
+    Severity.high: ("High Priority", "d93f0b", "P1 review finding — fix in the surfacing PR; if too large, tracked here"),
+    Severity.medium: ("Medium Priority", "fbca04", "P2 review finding — filed from review, not fixed in the surfacing PR"),
+    Severity.low: ("Low Priority", "0e8a16", "P3 review finding — filed from review, not fixed in the surfacing PR"),
 }
 
 # Marker in issue body to identify Vigil-created issues
@@ -180,7 +180,7 @@ def _build_issue_body(
     sections = [
         _VIGIL_ISSUE_MARKER,
         f"<!-- vigil-finding-key: {stable_finding_key(finding)} -->",
-        f"## {emoji} {finding.severity.value.upper()} — {finding.category}\n",
+        f"## {emoji} {finding.priority} · {finding.severity.value.upper()} — {finding.category}\n",
         f"**File:** `{loc}`",
         f"**Reviewer:** {persona}",
     ]
