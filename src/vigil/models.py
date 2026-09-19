@@ -11,6 +11,29 @@ class Severity(str, Enum):
     medium = "medium"
     low = "low"
 
+    @property
+    def priority(self) -> str:
+        """F2iLLC P-scale score for this severity (owner ruling 2026-09-18).
+
+        P0/P1 are fixed in the surfacing PR and block it; P2/P3 are filed as
+        prioritised issues and never block. The mapping is the one recorded in
+        LunaOS ``skills/address-comments/PRIORITY.md``.
+        """
+        return _SEVERITY_PRIORITY[self]
+
+    @property
+    def blocks_review(self) -> bool:
+        """True for P0/P1 (critical/high). P2/P3 findings are filed, not fixed."""
+        return self in (Severity.critical, Severity.high)
+
+
+_SEVERITY_PRIORITY: dict[Severity, str] = {
+    Severity.critical: "P0",
+    Severity.high: "P1",
+    Severity.medium: "P2",
+    Severity.low: "P3",
+}
+
 
 class Finding(BaseModel):
     file: str
@@ -28,6 +51,11 @@ class Finding(BaseModel):
     predicate: str = ""
     evidence_source: str = "unknown"
     evidence_commit: str = ""
+
+    @property
+    def priority(self) -> str:
+        """P0–P3 score derived from severity; rendered on every surface."""
+        return self.severity.priority
 
 
 # Machine-stable values for PersonaVerdict.skip_reason (F2iLLC/vigil#66).
