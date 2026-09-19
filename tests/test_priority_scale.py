@@ -13,7 +13,12 @@ from unittest.mock import MagicMock, patch
 from vigil.github_review import _format_finding, _format_inline_comment
 from vigil.issue_manager import _build_issue_body, priority_label_for
 from vigil.models import Finding, PersonaVerdict, Severity
-from vigil.personas import Persona, ReviewProfile
+from vigil.personas import (
+    _DEFAULT_LEAD_PROMPT,
+    _ENTERPRISE_LEAD_PROMPT,
+    Persona,
+    ReviewProfile,
+)
 from vigil.reviewer import _route_findings_by_priority, review_diff
 
 
@@ -75,13 +80,37 @@ class TestPriorityRendered:
         assert "P3 · LOW — bug" in body
 
 
+# ---------- Lead prompts get the rubric too ----------
+
+class TestLeadPromptHasPriorityRubric:
+    """Both built-in lead prompts define their own finding schema and never
+    receive ``VERDICT_SCHEMA`` — they need the P-scale definitions spliced in
+    separately, or a lead finding is scored against no rubric at all and can
+    be mislabeled ``high``, turning a bounded P2 into a blocking finding.
+    """
+
+    def test_default_lead_prompt_has_the_rubric(self):
+        assert "P0 —" in _DEFAULT_LEAD_PROMPT
+        assert "P1 —" in _DEFAULT_LEAD_PROMPT
+        assert "P2 —" in _DEFAULT_LEAD_PROMPT
+        assert "P3 —" in _DEFAULT_LEAD_PROMPT
+        assert "__PRIORITY_RUBRIC__" not in _DEFAULT_LEAD_PROMPT
+
+    def test_enterprise_lead_prompt_has_the_rubric(self):
+        assert "P0 —" in _ENTERPRISE_LEAD_PROMPT
+        assert "P1 —" in _ENTERPRISE_LEAD_PROMPT
+        assert "P2 —" in _ENTERPRISE_LEAD_PROMPT
+        assert "P3 —" in _ENTERPRISE_LEAD_PROMPT
+        assert "__PRIORITY_RUBRIC__" not in _ENTERPRISE_LEAD_PROMPT
+
+
 # ---------- Specialist routing ----------
 
 class TestRouteFindingsByPriority:
     def test_p2_p3_move_to_observations_and_verdict_approves(self):
         v = _verdict("REQUEST_CHANGES", [_finding("medium", "edge"), _finding("low", "polish")])
         filed = _route_findings_by_priority(v)
-        assert filed == 2
+        assert [f.message for f in filed] == ["edge", "polish"]
         assert v.findings == []
         assert [f.message for f in v.observations] == ["edge", "polish"]
         assert v.decision == "APPROVE"
@@ -89,7 +118,7 @@ class TestRouteFindingsByPriority:
     def test_p0_p1_stay_blocking(self):
         v = _verdict("REQUEST_CHANGES", [_finding("high", "real"), _finding("medium", "edge")])
         filed = _route_findings_by_priority(v)
-        assert filed == 1
+        assert [f.message for f in filed] == ["edge"]
         assert [f.message for f in v.findings] == ["real"]
         assert [f.message for f in v.observations] == ["edge"]
         assert v.decision == "REQUEST_CHANGES"
@@ -103,7 +132,7 @@ class TestRouteFindingsByPriority:
     def test_request_changes_with_no_findings_is_left_alone(self):
         # A blocking verdict that names nothing is not ours to soften here.
         v = _verdict("REQUEST_CHANGES", [])
-        assert _route_findings_by_priority(v) == 0
+        assert _route_findings_by_priority(v) == []
         assert v.decision == "REQUEST_CHANGES"
 
 
@@ -179,3 +208,98 @@ class TestReviewDiffPriorityRouting:
         ]
         result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, self._profile())
         assert result.decision == "REQUEST_CHANGES"
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer.completion")
+    def test_lead_block_backed_only_by_filed_findings_downgrades(self, mock_completion, mock_alerts):
+        # BLOCK is in BLOCKING_DECISIONS alongside REQUEST_CHANGES; the
+        # downgrade rule must not only handle the literal REQUEST_CHANGES value.
+        mock_alerts.return_value = 0
+        mock_completion.side_effect = [
+            self._resp({"decision": "APPROVE", "checks": {}, "findings": [], "observations": []}),
+            self._resp({
+                "decision": "BLOCK", "summary": "Naming nit",
+                "findings": [{"file": "a.py", "line": 3, "severity": "low",
+                              "category": "style", "message": "Rename"}],
+            }),
+        ]
+        result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, self._profile())
+        assert result.decision == "APPROVE"
+        assert [o.message for o in result.observations] == ["Rename"]
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer.completion")
+    @patch("vigil.decision_log.filter_known_findings")
+    def test_known_decision_suppression_removes_filed_evidence(
+        self, mock_filter, mock_completion, mock_alerts
+    ):
+        # The only P2/P3 finding is suppressed by the decision log (Step 1.5).
+        # The lead never saw it, so it must not count as evidence for
+        # downgrading the lead's own unsubstantiated REQUEST_CHANGES.
+        mock_alerts.return_value = 0
+        mock_filter.return_value = []
+        mock_completion.side_effect = [
+            self._resp({
+                "decision": "REQUEST_CHANGES", "checks": {},
+                "findings": [{"file": "a.py", "line": 1, "severity": "medium",
+                              "category": "bug", "message": "Edge case"}],
+                "observations": [],
+            }),
+            self._resp({"decision": "REQUEST_CHANGES", "summary": "Unexplained", "findings": []}),
+        ]
+        result = review_diff(
+            "diff --git a/a.py b/a.py\n", self._ctx, self._profile(),
+            repo_key="owner/repo",
+        )
+        assert result.observations == []
+        assert result.decision == "REQUEST_CHANGES"
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer.completion")
+    def test_nonblocking_persona_filed_finding_counts_as_evidence(self, mock_completion, mock_alerts):
+        # A non-blocking persona (e.g. Security) moves every finding to
+        # observations before P-scale routing ever sees it. Its P2/P3 findings
+        # must still count as filed evidence for Step 2.7, or a lead that
+        # references one in its summary (per the zero-duplication rule)
+        # instead of re-filing it leaves an unsubstantiated REQUEST_CHANGES
+        # standing.
+        mock_alerts.return_value = 0
+        mock_completion.side_effect = [
+            self._resp({
+                "decision": "REQUEST_CHANGES", "checks": {},
+                "findings": [{"file": "a.py", "line": 1, "severity": "medium",
+                              "category": "bug", "message": "Edge case"}],
+                "observations": [],
+            }),
+            self._resp({"decision": "REQUEST_CHANGES", "summary": "Echoes Security", "findings": []}),
+        ]
+        persona = Persona(name="Security", focus="Sec", system_prompt="Test", blocking=False)
+        profile = ReviewProfile(name="test", specialists=[persona], lead_prompt="Lead")
+        result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, profile)
+        assert result.decision == "APPROVE"
+        assert [o.message for o in result.observations] == ["Edge case"]
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer.completion")
+    def test_lead_filed_observation_dedupes_against_specialist(self, mock_completion, mock_alerts):
+        # A lead P2/P3 finding that paraphrases a specialist's already-filed
+        # observation at the same location must merge with it, not become a
+        # second near-identical issue (F2iLLC/vigil#96's failure mode, now
+        # reachable from the lead's own filed findings too).
+        mock_alerts.return_value = 0
+        mock_completion.side_effect = [
+            self._resp({
+                "decision": "APPROVE", "checks": {},
+                "findings": [{"file": "a.py", "line": 5, "severity": "low",
+                              "category": "style", "message": "Rename this loop variable"}],
+                "observations": [],
+            }),
+            self._resp({
+                "decision": "REQUEST_CHANGES", "summary": "Naming",
+                "findings": [{"file": "a.py", "line": 5, "severity": "low",
+                              "category": "style", "message": "Loop variable name is unclear"}],
+            }),
+        ]
+        result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, self._profile())
+        assert len(result.observations) == 1
+        assert result.observation_sources[0][0] == "Logic + Lead"
