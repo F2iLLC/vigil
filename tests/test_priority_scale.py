@@ -229,6 +229,30 @@ class TestReviewDiffPriorityRouting:
 
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer.completion")
+    def test_lead_block_with_no_own_finding_stands_despite_unrelated_filed_finding(
+        self, mock_completion, mock_alerts
+    ):
+        # BLOCK is the lead's own discovery, never a specialist passthrough
+        # (unlike REQUEST_CHANGES, whose decision rule IS "if any specialist
+        # returned REQUEST_CHANGES"). An unrelated specialist's filed P2/P3
+        # finding is not evidence that this BLOCK rested on it, so it must
+        # not downgrade a BLOCK that names no finding of the lead's own
+        # (Codex review on #105 — this used to fail open to APPROVE).
+        mock_alerts.return_value = 0
+        mock_completion.side_effect = [
+            self._resp({
+                "decision": "APPROVE", "checks": {},
+                "findings": [{"file": "a.py", "line": 1, "severity": "medium",
+                              "category": "bug", "message": "Edge case"}],
+                "observations": [],
+            }),
+            self._resp({"decision": "BLOCK", "summary": "Unrelated plan misalignment", "findings": []}),
+        ]
+        result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, self._profile())
+        assert result.decision == "BLOCK"
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer.completion")
     @patch("vigil.decision_log.filter_known_findings")
     def test_known_decision_suppression_removes_filed_evidence(
         self, mock_filter, mock_completion, mock_alerts

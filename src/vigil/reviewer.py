@@ -815,11 +815,7 @@ def review_diff(
     # --- Step 2.7: P-scale routing for the lead's own findings ---
     # Same rule the specialists got in _route_findings_by_priority: a P2/P3
     # lead finding (including a merged cross-specialist one) is filed as an
-    # issue, not fixed in this PR, so it leaves the blocking list. The lead's
-    # blocking verdict (REQUEST_CHANGES or BLOCK — both built-in lead schemas
-    # allow BLOCK) is downgraded only when it demonstrably rested on filed
-    # findings alone — findings existed and none of them blocks. A blocking
-    # lead verdict with no findings at all is left standing (fail closed).
+    # issue, not fixed in this PR, so it leaves the blocking list.
     lead_filed = [f for f in lead_findings if not f.severity.blocks_review]
     lead_findings = [f for f in lead_findings if f.severity.blocks_review]
     any_blocking = bool(lead_findings) or any(
@@ -828,8 +824,24 @@ def review_diff(
     any_finding_existed = (
         bool(lead_filed) or specialist_filed_count > 0 or any(v.findings for v in verdicts)
     )
-    if decision in BLOCKING_DECISIONS and any_finding_existed and not any_blocking:
-        decision = "APPROVE"
+    # REQUEST_CHANGES is downgraded on *any* filed evidence, including a
+    # specialist's, because the lead's own decision rule is a passthrough of
+    # specialist verdicts ("If ANY specialist returned REQUEST_CHANGES ->
+    # REQUEST_CHANGES") — a specialist's filed finding plausibly explains it.
+    #
+    # BLOCK gets no such benefit of the doubt: its decision rule is the
+    # lead's *own* discovery ("If you find a fundamental issue -> BLOCK"),
+    # never a specialist passthrough, so an unrelated specialist's filed
+    # observation is not evidence that this BLOCK rested on it. Downgrading
+    # on that alone converted a lead's independent, unrelated objection to
+    # APPROVE (Codex review on #105) — the exact fail-open case "a blocking
+    # verdict with no findings at all is left standing" exists to prevent.
+    # BLOCK is downgraded only on the lead's *own* filed finding.
+    if not any_blocking:
+        if decision == "REQUEST_CHANGES" and any_finding_existed:
+            decision = "APPROVE"
+        elif decision == "BLOCK" and lead_filed:
+            decision = "APPROVE"
 
     # --- Step 3: Aggregate observations with persona tracking ---
     all_observations: list[Finding] = []
