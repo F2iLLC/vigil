@@ -37,6 +37,35 @@ _EVIDENCE_PLACEHOLDER = "__FINDING_EVIDENCE_FIELDS__"
 
 _LEAD_SUBSTANTIATION_PLACEHOLDER = "__LEAD_BLOCK_SUBSTANTIATION__"
 
+_PRIORITY_RUBRIC_PLACEHOLDER = "__PRIORITY_RUBRIC__"
+
+# The F2iLLC P-scale, shared verbatim between every specialist schema and both
+# lead prompts (owner ruling 2026-09-18; LunaOS
+# ``skills/address-comments/PRIORITY.md``). Only critical/high (P0/P1) block a
+# PR; medium/low (P2/P3) are filed as prioritised issues instead.
+#
+# Declared once for the same reason ``FINDING_EVIDENCE_FIELDS`` is: it used to
+# live only in ``VERDICT_SCHEMA``, which is interpolated into specialist
+# prompts, so a lead-originated finding was scored with no rubric at all and
+# could be mislabeled `high` — turning a bounded P2 into a blocking finding
+# the fleet's own routing (``reviewer._route_findings_by_priority`` and its
+# Step 2.7 lead counterpart) exists to keep out of the blocking path.
+_PRIORITY_RUBRIC = """- Severity is the F2iLLC P-scale (every reviewer in the fleet scores on it):
+    critical = P0 — must never merge: data loss/corruption, a security hole,
+               broken main/CI for everyone, a wrong regulated record, an outage path.
+    high     = P1 — a real functional defect in what this PR changes or claims:
+               wrong behavior on the normal path, a violated contract, a test
+               that should fail but passes.
+    medium   = P2 — a real defect with bounded blast radius: an edge case, an
+               uncommon input, an unusual-timing race, a pre-existing defect the
+               diff makes visible.
+    low      = P3 — robustness, maintainability, clarity or coverage where the
+               current behavior is not incorrect.
+  Only critical/high (P0/P1) block the PR. Medium/low (P2/P3) findings are
+  filed as prioritised issues and NOT fixed in this PR, so score honestly:
+  inflating a P2 to P1 to force a fix wears the team down; deflating a P1 to
+  P2 ships a defect. Fix cost never changes the score."""
+
 # Only the lead can block a PR that no specialist objected to, so only the lead
 # needs this. On F2iLLC/LunaOS#5082 it spent a BLOCK on a documentation table
 # that already said, in four places, exactly what the block asked it to say
@@ -83,15 +112,30 @@ def _with_evidence_fields(schema: str) -> str:
 
 
 def _finalize_lead_prompt(prompt: str) -> str:
-    """A lead prompt needs the evidence fields *and* the substantiation rules."""
+    """A lead prompt needs the evidence fields, the substantiation rules, and
+    the priority rubric.
+
+    Missing the rubric is a startup failure, the same way missing the
+    evidence fields is: a lead schema silently scored severity with no
+    definitions at all is how a bounded P2 becomes a blocking `high` finding.
+    """
     if _LEAD_SUBSTANTIATION_PLACEHOLDER not in prompt:
         raise ValueError(
             f"lead prompt is missing {_LEAD_SUBSTANTIATION_PLACEHOLDER!r}: the "
             "lead is the only reviewer that can block with no specialist "
             "behind it (F2iLLC/vigil#81)"
         )
-    return _with_evidence_fields(prompt).replace(
-        _LEAD_SUBSTANTIATION_PLACEHOLDER, _LEAD_BLOCK_SUBSTANTIATION,
+    if _PRIORITY_RUBRIC_PLACEHOLDER not in prompt:
+        raise ValueError(
+            f"lead prompt is missing {_PRIORITY_RUBRIC_PLACEHOLDER!r}: the "
+            "lead scores severity too and must share the same P-scale "
+            "definitions as the specialists, or its findings are scored "
+            "with no rubric at all"
+        )
+    return (
+        _with_evidence_fields(prompt)
+        .replace(_LEAD_SUBSTANTIATION_PLACEHOLDER, _LEAD_BLOCK_SUBSTANTIATION)
+        .replace(_PRIORITY_RUBRIC_PLACEHOLDER, _PRIORITY_RUBRIC)
     )
 
 
@@ -120,21 +164,7 @@ __FINDING_EVIDENCE_FIELDS__
 Rules:
 - If you have no findings, return "decision": "APPROVE" with empty findings list.
 - Only return REQUEST_CHANGES if there are high or critical severity findings.
-- Severity is the F2iLLC P-scale (every reviewer in the fleet scores on it):
-    critical = P0 — must never merge: data loss/corruption, a security hole,
-               broken main/CI for everyone, a wrong regulated record, an outage path.
-    high     = P1 — a real functional defect in what this PR changes or claims:
-               wrong behavior on the normal path, a violated contract, a test
-               that should fail but passes.
-    medium   = P2 — a real defect with bounded blast radius: an edge case, an
-               uncommon input, an unusual-timing race, a pre-existing defect the
-               diff makes visible.
-    low      = P3 — robustness, maintainability, clarity or coverage where the
-               current behavior is not incorrect.
-  Only critical/high (P0/P1) block the PR. Medium/low (P2/P3) findings are
-  filed as prioritised issues and NOT fixed in this PR, so score honestly:
-  inflating a P2 to P1 to force a fix wears the team down; deflating a P1 to
-  P2 ships a defect. Fix cost never changes the score.
+__PRIORITY_RUBRIC__
 - Be specific: file paths, line numbers, concrete suggestions.
 - Observations without a concrete action are invalid and will be discarded.
 
@@ -193,7 +223,9 @@ FACTUAL CLAIMS VS. THREAD EVIDENCE:
   failed check independently proves it.
 """
 
-VERDICT_SCHEMA = _with_evidence_fields(VERDICT_SCHEMA)
+VERDICT_SCHEMA = _with_evidence_fields(
+    VERDICT_SCHEMA.replace(_PRIORITY_RUBRIC_PLACEHOLDER, _PRIORITY_RUBRIC)
+)
 
 
 @dataclass
@@ -668,6 +700,9 @@ the constraint — specialists do not dictate solutions across domain boundaries
 
 __LEAD_BLOCK_SUBSTANTIATION__
 
+When you score a finding's severity, use the same scale the specialists do:
+__PRIORITY_RUBRIC__
+
 Decision rules:
 - If ANY specialist returned REQUEST_CHANGES with critical/high findings -> REQUEST_CHANGES
 - If all specialists APPROVE and you find no blocking issues -> APPROVE
@@ -735,6 +770,9 @@ Specialists own their domains. When a finding crosses domain boundaries, route
 the constraint — no specialist dictates solutions in another's domain.
 
 __LEAD_BLOCK_SUBSTANTIATION__
+
+When you score a finding's severity, use the same scale the specialists do:
+__PRIORITY_RUBRIC__
 
 Decision rules:
 - If ANY specialist returned REQUEST_CHANGES -> consolidate issues -> REQUEST_CHANGES
