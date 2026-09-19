@@ -750,17 +750,17 @@ def review_diff(
     # below it staying complete.
     #
     # Two boundaries this must not cross:
-    #   * A blocking lead verdict is never downgraded. The lead reads the full
-    #     diff, so it can object even when no specialist ran, and turning that
-    #     REQUEST_CHANGES into a non-blocking COMMENT would fail open — the
-    #     exact defect being fixed, pointed the other way.
+    #   * A blocking lead verdict is never downgraded *here*. The lead reads
+    #     the full diff, so it can object even when no specialist ran, and
+    #     turning that REQUEST_CHANGES/BLOCK into a non-blocking COMMENT would
+    #     fail open — the exact defect being fixed, pointed the other way.
+    #     (Step 2.7 below can still turn it into APPROVE on filed evidence
+    #     alone; the guard below re-applies `all_specialists_skipped` to that
+    #     outcome so it lands on NOT_REVIEWED too, not APPROVE.)
     #   * A partial skip is untouched. Any specialist having run means the
     #     verdict is a real one; only a total skip is an absence of review.
-    if (
-        verdicts
-        and not any(v.reviewed for v in verdicts)
-        and decision not in BLOCKING_DECISIONS
-    ):
+    all_specialists_skipped = bool(verdicts) and not any(v.reviewed for v in verdicts)
+    if all_specialists_skipped and decision not in BLOCKING_DECISIONS:
         decision = DECISION_NOT_REVIEWED
 
     # --- Step 3.5: Cross-specialist deduplication ---
@@ -842,6 +842,20 @@ def review_diff(
             decision = "APPROVE"
         elif decision == "BLOCK" and lead_filed:
             decision = "APPROVE"
+
+    # Step 2.5 deliberately left a blocking decision standing through a total
+    # specialist skip — a blocking lead verdict is never downgraded there, on
+    # the theory the lead's own read of the full diff might be real even with
+    # no specialist behind it. This step can turn that same verdict into
+    # APPROVE moments later, on nothing but the lead's own filed P2/P3
+    # finding, which quietly reopens exactly what Step 2.5 exists to close:
+    # an aggregate APPROVE that satisfies a required-approval rule while zero
+    # specialists examined the PR (#79, F2iLLC/LunaOS#5028). Re-applying the
+    # same total-skip guard here (Codex review on #105) sends that case to
+    # NOT_REVIEWED instead — still non-blocking, but no longer counted as an
+    # approval.
+    if all_specialists_skipped and decision == "APPROVE":
+        decision = DECISION_NOT_REVIEWED
 
     # --- Step 3: Aggregate observations with persona tracking ---
     all_observations: list[Finding] = []

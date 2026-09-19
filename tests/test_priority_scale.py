@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from vigil.github_review import _format_finding, _format_inline_comment
 from vigil.issue_manager import _build_issue_body, priority_label_for
-from vigil.models import Finding, PersonaVerdict, Severity
+from vigil.models import DECISION_NOT_REVIEWED, Finding, PersonaVerdict, Severity
 from vigil.personas import (
     _DEFAULT_LEAD_PROMPT,
     _ENTERPRISE_LEAD_PROMPT,
@@ -250,6 +250,32 @@ class TestReviewDiffPriorityRouting:
         ]
         result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, self._profile())
         assert result.decision == "BLOCK"
+
+    @patch("vigil.reviewer.send_alerts_for_verdicts")
+    @patch("vigil.reviewer.completion")
+    def test_total_skip_lead_block_downgrade_lands_on_not_reviewed(self, mock_completion, mock_alerts):
+        # Step 2.5 (#79) deliberately leaves a blocking lead verdict standing
+        # through a total specialist skip, rather than softening it to
+        # NOT_REVIEWED, because the lead read the full diff on its own. But
+        # if Step 2.7 then downgrades that same BLOCK to APPROVE on nothing
+        # but the lead's own filed P2/P3 finding, the result is an aggregate
+        # APPROVE from a review where zero specialists examined anything —
+        # exactly the fail-open #79 exists to close, reopened one step later
+        # (Codex review on #105). It must land on NOT_REVIEWED instead.
+        mock_alerts.return_value = 0
+        # No specialist call: the persona's file_patterns don't match "a.py",
+        # so it is skipped (reviewed=False) before any model is asked.
+        mock_completion.side_effect = [
+            self._resp({
+                "decision": "BLOCK", "summary": "Minor",
+                "findings": [{"file": "a.py", "line": 3, "severity": "low",
+                              "category": "style", "message": "Rename"}],
+            }),
+        ]
+        persona = Persona(name="Docs", focus="Docs", system_prompt="Test", file_patterns=["*.md"])
+        profile = ReviewProfile(name="test", specialists=[persona], lead_prompt="Lead")
+        result = review_diff("diff --git a/a.py b/a.py\n", self._ctx, profile)
+        assert result.decision == DECISION_NOT_REVIEWED
 
     @patch("vigil.reviewer.send_alerts_for_verdicts")
     @patch("vigil.reviewer.completion")
