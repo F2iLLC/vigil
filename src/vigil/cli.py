@@ -25,6 +25,7 @@ from .comment_manager import (
 )
 from .decision_log import clear_decisions, get_decisions, remove_decision
 from .diff_parser import commentable_lines, parse_diff
+from .finding_validation import validate_findings_against_head
 from .github import (
     get_changed_files_between_commits,
     get_pr_data,
@@ -140,6 +141,40 @@ def _print_summary_stats(result: ReviewResult):
     not_run = sum(1 for v in result.specialist_verdicts if not v.reviewed)
     not_run_note = f" · {not_run} not reviewed" if not_run else ""
     console.print(f"\n[dim]{approvals}/{total} specialists approved{not_run_note} · {total_findings} findings · {total_obs} observations[/dim]")
+
+
+def _validate_observations_against_head(
+    result: ReviewResult,
+    owner: str,
+    repo: str,
+    token: str,
+    diff: str,
+) -> list:
+    """Drop observations the reviewed head positively contradicts (#106).
+
+    ``post_review`` already runs this #74 check on blocking findings, but
+    only over ``specialist_verdicts[].findings`` / ``lead_findings`` — a P2/P3
+    finding routed to ``result.observations`` by the P-scale (#102) never
+    reaches it. Worse, ``create_issues_for_observations`` runs *before*
+    ``post_review`` at all, so nothing checked a filed observation against
+    head before it was persisted as a standing issue. This runs the same
+    check over ``result.observations`` first, and mutates ``result`` in place
+    (identity-preserving, so ``observation_sources``/``observation_consensus``
+    lookups by ``id()`` still resolve) so both issue creation and the review
+    body it feeds see the same filtered set.
+
+    Returns the list of ``SuppressedFinding`` withheld, for the caller to log.
+    """
+    if not result.observations or not result.commit_sha:
+        return []
+    diff_files = list(commentable_lines(diff)) if diff else None
+    supported, suppressed = validate_findings_against_head(
+        result.observations, owner, repo, result.commit_sha, token,
+        diff_files=diff_files,
+    )
+    if suppressed:
+        result.observations = supported
+    return suppressed
 
 
 def _rereview_reasons(
@@ -452,6 +487,19 @@ def review(
 
         # Create issues for observations before posting the review
         observation_issues: list[tuple[Finding, str]] | None = None
+        if result.observations:
+            try:
+                suppressed_observations = _validate_observations_against_head(
+                    result, owner, repo, token, pr_data.get("diff", ""),
+                )
+                if suppressed_observations:
+                    console.print(
+                        f"[dim yellow]Withheld {len(suppressed_observations)} observation(s) "
+                        "not supported at head[/dim yellow]"
+                    )
+            except Exception as e:  # noqa: BLE001 — validation never blocks filing
+                console.print(f"[dim yellow]Observation validation failed: {e}[/dim yellow]")
+
         if result.observations:
             console.print(f"[dim]Creating issues for {len(result.observations)} observation(s)...[/dim]")
             try:

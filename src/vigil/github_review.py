@@ -99,7 +99,7 @@ def _format_finding(f: Finding, persona: str | None = None) -> str:
     source = f" ({persona})" if persona else ""
     line = f"  \n`{f.file}:{f.line}`" if f.line else f"  \n`{f.file}`"
     suggestion = f"  \n**Suggestion:** {f.suggestion}" if f.suggestion else ""
-    return f"{icon} **[{f.severity.value.upper()}]** [{f.category}]{source}{line}  \n{f.message}{suggestion}"
+    return f"{icon} **{f.priority}** **[{f.severity.value.upper()}]** [{f.category}]{source}{line}  \n{f.message}{suggestion}"
 
 
 def _format_inline_comment(f: Finding, persona: str | None = None, session_id: str = "") -> str:
@@ -110,6 +110,7 @@ def _format_inline_comment(f: Finding, persona: str | None = None, session_id: s
     suggestion = f"\n\n**Suggestion:** {f.suggestion}" if f.suggestion else ""
     metadata = embed_json_metadata({
         "severity": f.severity.value,
+        "priority": f.priority,
         "category": f.category,
         "message": f.message,
         "suggestion": f.suggestion,
@@ -120,7 +121,7 @@ def _format_inline_comment(f: Finding, persona: str | None = None, session_id: s
         "finding_key": stable_finding_key(f),
     })
     return (
-        f"{icon} **[{f.severity.value.upper()}]** [{f.category}]{source}{sid}\n\n"
+        f"{icon} **{f.priority}** **[{f.severity.value.upper()}]** [{f.category}]{source}{sid}\n\n"
         f"{f.message}{suggestion}\n\n{metadata}"
     )
 
@@ -276,11 +277,11 @@ def _build_review_body(
                     # Extract issue number from URL for compact display
                     issue_num = url.rstrip("/").split("/")[-1]
                     sections.append(
-                        f"- {sev_icon} [{obs.severity.value.upper()}] {loc} \u2014 {msg} \u2192 [#{issue_num}]({url})"
+                        f"- {sev_icon} **{obs.priority}** [{obs.severity.value.upper()}] {loc} \u2014 {msg} \u2192 [#{issue_num}]({url})"
                     )
                 else:
                     sections.append(
-                        f"- {sev_icon} [{obs.severity.value.upper()}] {loc} \u2014 {msg}"
+                        f"- {sev_icon} **{obs.priority}** [{obs.severity.value.upper()}] {loc} \u2014 {msg}"
                     )
             sections.append("")
         else:
@@ -383,7 +384,7 @@ def _build_suppressed_findings_section(
         loc = f"`{f.file}" + (f":{f.line}" if f.line else "") + "`"
         msg = f.message if len(f.message) <= 100 else f.message[:97] + "..."
         lines.append(
-            f"- {severity_emoji(f.severity)} [{f.severity.value.upper()}] "
+            f"- {severity_emoji(f.severity)} **{f.priority}** [{f.severity.value.upper()}] "
             f"{loc} — {msg} — *withheld: {item.reason_text}*"
         )
     lines.append("")
