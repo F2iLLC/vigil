@@ -19,6 +19,25 @@ permissions:
 
 jobs:
   vigil:
+    # STATUS (recorded 2026-09-27, F2iLLC/vigil#90; #69 closed with this
+    # undone):
+    #   * GitHub state: the "Vigil PR Review" workflow has been
+    #     `disabled_manually` since its last run on 2026-03-14. The reason for
+    #     that March disablement was never recorded anywhere and remains
+    #     unrecorded — do not assume one.
+    #   * VIGIL_SKIP=true has been set on all five F2iLLC repositories (vigil,
+    #     LunaOS, bioqms-core, relara, praxislms) since 2026-09-10 for cost
+    #     control: the shared org Gemini API / Actions budget was exhausted in
+    #     early September 2026 (owner decision, recorded in #90).
+    #   * Preconditions before anyone re-enables it (#90 / #88 triage):
+    #     (a) reusable-vigil.yml pins the action at SHA ce4df1c…, 15 commits
+    #         behind main (#88) — re-enabling would self-review with a stale
+    #         reviewer until #88 is ruled;
+    #     (b) the `ci-general` self-hosted runner label targeted by
+    #         runner-json has not been verified online; with no such runner,
+    #         jobs queue indefinitely rather than failing.
+    #   * Re-enabling (here or via VIGIL_SKIP) is an owner decision.
+    #
     # KILL SWITCH: set the Actions variable VIGIL_SKIP=true (`gh variable set
     # VIGIL_SKIP -b true`) to skip Vigil on this repo without editing the
     # workflow; unset it to resume. The reusable workflow's checks are not

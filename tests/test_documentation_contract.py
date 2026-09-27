@@ -211,3 +211,13 @@ def test_readme_documents_the_fork_constraint_for_external_context():
     # promises of this seam, not incidental prose.
     assert "VIGIL_CONTEXT_TOKEN" in README
     assert "Fails open" in README
+
+
+# --- F2iLLC/vigil#90 (why Vigil PR Review stays off) ----------------------
+
+
+def test_caller_workflow_records_why_vigil_is_skipped():
+    assert "VIGIL_SKIP" in CALLER
+    assert "#90" in CALLER, (
+        "vigil.yml must keep the recorded reason it stays off, citing #90"
+    )
