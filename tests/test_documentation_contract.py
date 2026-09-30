@@ -211,3 +211,48 @@ def test_readme_documents_the_fork_constraint_for_external_context():
     # promises of this seam, not incidental prose.
     assert "VIGIL_CONTEXT_TOKEN" in README
     assert "Fails open" in README
+
+
+# --- F2iLLC/vigil#90 (why Vigil PR Review stays off) ----------------------
+
+
+def _caller_prose() -> str:
+    """vigil.yml's comment prose, unwrapped.
+
+    The record this file guards lives in YAML comments, so its sentences are
+    broken by line wrapping: "for cost" can end one line with "control:"
+    starting the next. Strip the leading comment marker and collapse
+    whitespace so the assertions below match the recorded *meaning*:
+    re-flowing the comment is free, deleting it is not.
+    Inline references such as ``#90`` survive, only the leading marker goes.
+    """
+    unmarked = (re.sub(r"^\s*#\s?", "", line) for line in CALLER.splitlines())
+    return re.sub(r"\s+", " ", " ".join(unmarked))
+
+
+def test_caller_workflow_records_why_vigil_is_skipped():
+    # The switch this record governs.
+    assert "VIGIL_SKIP" in CALLER
+
+    # #69 asked for the switch to be re-enabled *or* the reason it stays off
+    # recorded, and was closed with neither done. The record is the deliverable,
+    # so pin its substance rather than its citation: the assertion above is not
+    # load-bearing (the pre-existing kill-switch prose already supplies
+    # "VIGIL_SKIP"), and a citation alone would let a bare "# See #90" pass
+    # while the rationale disappeared. Each phrase below is one fact the record
+    # exists to carry. The dated "commits behind" snapshot is deliberately
+    # absent — it drifts by design and must not be frozen by a test.
+    prose = _caller_prose()
+    for phrase, fact in (
+        ("#90", "the triage that ruled it"),
+        ("disabled_manually", "the GitHub state being explained"),
+        ("2026-03-14", "the last run; March's reason was never recorded"),
+        ("cost control", "why VIGIL_SKIP=true fleet-wide"),
+        ("#88", "precondition (a): the stale reusable-vigil.yml SHA pin"),
+        ("ci-general", "precondition (b): the unverified self-hosted runner"),
+        ("owner decision", "who may reverse it"),
+    ):
+        assert phrase in prose, (
+            f"vigil.yml must keep {phrase!r} in the recorded reason it stays "
+            f"off ({fact})"
+        )
