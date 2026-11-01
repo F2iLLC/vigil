@@ -141,6 +141,10 @@ def _is_retryable_llm_error(err: Exception | str) -> bool:
 
 def _call_llm_with_retry(messages: list[dict], model: str, **kwargs):
     """Call litellm completion with exponential backoff on rate limits and transient errors."""
+    # Some models (e.g. claude-sonnet-5-5) accept only a fixed temperature and
+    # LiteLLM raises UnsupportedParamsError for temperature=0.2. Drop any
+    # parameter the selected model rejects rather than failing the whole review.
+    kwargs.setdefault("drop_params", True)
     for attempt in range(MAX_RETRIES):
         try:
             return completion(model=model, messages=messages, **kwargs)
