@@ -455,7 +455,9 @@ Checks: {checks_str}
 ## Specialist Verdicts
 {verdicts_text}
 
-Review this PR as the final gate. Consider the specialist verdicts above."""
+Review this PR as the final gate. Consider the specialist verdicts above.
+
+Reply with ONLY the single JSON object described in your instructions. No prose before or after it and no markdown fences. Some models ignore response_format, so this instruction is what guarantees JSON."""
 
     response = _call_llm_with_retry(
         messages=[
