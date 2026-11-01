@@ -47,20 +47,20 @@ def _parse_json_response(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Handle trailing text after valid JSON (common with some models)
-    # Find the last closing brace and try parsing up to there
-    depth = 0
-    end = -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    if end > 0:
-        return json.loads(text[:end])
+    # Handle prose before and/or after the JSON object (common with some models,
+    # which answer 'Here is the verdict:' and then the object): decode the first
+    # valid JSON object found at any opening brace in the reply.
+    decoder = json.JSONDecoder()
+    pos = text.find("{")
+    while pos != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            pos = text.find("{", pos + 1)
+            continue
+        if isinstance(obj, dict):
+            return obj
+        pos = text.find("{", pos + 1)
 
     raise json.JSONDecodeError("No valid JSON object found", text, 0)
 
@@ -139,8 +139,26 @@ def _is_retryable_llm_error(err: Exception | str) -> bool:
     return any(x in err_str for x in ("rate_limit", "429", "503", "service unavailable", "unavailable", "timeout", "timed out"))
 
 
+def _response_json(response, label: str) -> dict:
+    """Parse a completion's JSON, reporting finish_reason and a content preview on failure."""
+    choice = response.choices[0]
+    content = choice.message.content or ""
+    try:
+        return _parse_json_response(content)
+    except Exception as e:
+        raise ValueError(
+            f"{label}: model reply was not valid JSON ({e}); "
+            f"finish_reason={getattr(choice, 'finish_reason', '?')!r}, "
+            f"reply_chars={len(content)}, reply_start={content[:200]!r}"
+        ) from e
+
+
 def _call_llm_with_retry(messages: list[dict], model: str, **kwargs):
     """Call litellm completion with exponential backoff on rate limits and transient errors."""
+    # Some models (e.g. claude-sonnet-5-5) accept only a fixed temperature and
+    # LiteLLM raises UnsupportedParamsError for temperature=0.2. Drop any
+    # parameter the selected model rejects rather than failing the whole review.
+    kwargs.setdefault("drop_params", True)
     for attempt in range(MAX_RETRIES):
         try:
             return completion(model=model, messages=messages, **kwargs)
@@ -437,7 +455,9 @@ Checks: {checks_str}
 ## Specialist Verdicts
 {verdicts_text}
 
-Review this PR as the final gate. Consider the specialist verdicts above."""
+Review this PR as the final gate. Consider the specialist verdicts above.
+
+Reply with ONLY the single JSON object described in your instructions. No prose before or after it and no markdown fences. Some models ignore response_format, so this instruction is what guarantees JSON."""
 
     response = _call_llm_with_retry(
         messages=[
@@ -449,7 +469,7 @@ Review this PR as the final gate. Consider the specialist verdicts above."""
         temperature=0.2,
     )
 
-    raw = _parse_json_response(response.choices[0].message.content)
+    raw = _response_json(response, "lead reviewer")
     decision = raw.get("decision", "APPROVE")
     summary = raw.get("summary", "")
     findings = _parse_findings(raw.get("findings", []))

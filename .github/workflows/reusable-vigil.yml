@@ -74,10 +74,14 @@ on:
       VIGIL_CONTEXT_TOKEN:
         required: false
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+# No `permissions:` here on purpose. A reusable workflow can only keep or reduce
+# the permissions its caller grants, so declaring them here would make
+# `id-token` impossible to opt into. Jobs run with the CALLER's permissions.
+# The caller must grant `contents: read`, `pull-requests: write` and
+# `issues: write` (as before). To use Anthropic workload identity federation
+# instead of a stored ANTHROPIC_API_KEY, it must also grant `id-token: write`
+# and have the four ANTHROPIC_* Actions variables set; callers that use a
+# static key need no change.
 
 jobs:
   review:
@@ -129,9 +133,14 @@ jobs:
           LEAD_MODEL: ${{ inputs.lead-model }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           missing=()
+          use_wif=false
 
           check_model_key() {
             local selected_model="$1"
@@ -140,7 +149,13 @@ jobs:
                 [ -n "$GEMINI_API_KEY" ] || missing+=("GEMINI_API_KEY")
                 ;;
               claude-*|anthropic/*)
-                [ -n "$ANTHROPIC_API_KEY" ] || missing+=("ANTHROPIC_API_KEY")
+                if [ -n "$ANTHROPIC_API_KEY" ]; then
+                  :
+                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
+                  use_wif=true
+                else
+                  missing+=("ANTHROPIC_API_KEY (or all four ANTHROPIC_FEDERATION_RULE_ID / _ORGANIZATION_ID / _SERVICE_ACCOUNT_ID / _WORKSPACE_ID variables)")
+                fi
                 ;;
               gpt-*|o[0-9]-*|openai/*)
                 [ -n "$OPENAI_API_KEY" ] || missing+=("OPENAI_API_KEY")
@@ -153,6 +168,7 @@ jobs:
             check_model_key "$LEAD_MODEL"
           fi
 
+          echo "use_wif=$use_wif" >> "$GITHUB_OUTPUT"
           if [ "${#missing[@]}" -eq 0 ]; then
             echo "has_key=true" >> "$GITHUB_OUTPUT"
           else
@@ -249,6 +265,43 @@ jobs:
             } >> "$GITHUB_OUTPUT"
           fi
 
+      # Anthropic workload identity federation: trade this run's GitHub OIDC
+      # token for a short-lived Anthropic access token (sk-ant-oat...), which
+      # LiteLLM sends as a Bearer credential. Used only when no static
+      # ANTHROPIC_API_KEY secret exists (see "Check review provider key").
+      # Fork PRs get no OIDC token, so a failure here is non-fatal and the
+      # review then reports the missing credential.
+      - name: Exchange GitHub OIDC token for Anthropic access token
+        id: wif
+        if: steps.provider.outputs.has_key == 'true' && steps.provider.outputs.use_wif == 'true'
+        continue-on-error: true
+        shell: bash
+        env:
+          FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No GitHub OIDC token is available. To use Anthropic workload identity federation the calling workflow must grant 'id-token: write' (or set a static ANTHROPIC_API_KEY secret)."
+            exit 1
+          fi
+          JWT="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r .value)"
+          echo "::add-mask::$JWT"
+          # Non-secret claims only, so a federation-rule mismatch is diagnosable.
+          echo "OIDC claims: $(cut -d. -f2 <<<"$JWT" | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c '{iss,sub,aud,repository,repository_owner,ref,event_name}' 2>/dev/null || echo unreadable)"
+          BODY="$(mktemp)"
+          CODE="$(jq -n --arg jwt "$JWT" --arg rule "$FEDERATION_RULE_ID"               --arg org "$ORGANIZATION_ID" --arg sa "$SERVICE_ACCOUNT_ID" --arg ws "$WORKSPACE_ID"               '{grant_type:"urn:ietf:params:oauth:grant-type:jwt-bearer",assertion:$jwt,
+                federation_rule_id:$rule,organization_id:$org,service_account_id:$sa,workspace_id:$ws}'             | curl -sS -o "$BODY" -w '%{http_code}' https://api.anthropic.com/v1/oauth/token                 -H "content-type: application/json" --data @-)"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Anthropic token exchange failed: HTTP $CODE: $(head -c 600 "$BODY")"
+            exit 1
+          fi
+          TOKEN="$(jq -r .access_token "$BODY")"
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
       # Pin the composite action independently from this reusable workflow.
       # Update this one reference when a reviewed Vigil implementation lands.
       #
@@ -266,7 +319,7 @@ jobs:
       # all — versus consumers calling the composite action directly at
       # `@v1` the way every current consumer does — is an open owner
       # decision tracked in F2iLLC/vigil#88; this comment does not decide it.
-      - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
+      - uses: F2iLLC/vigil@6481d8bc7e2cd99ba7152bcd0b17e8ee43f64c2b
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory }}
         with:
@@ -282,7 +335,7 @@ jobs:
           context-label: ${{ steps.context.outputs.label }}
           context-token: ${{ steps.context.outputs.allowed == 'true' && secrets.VIGIL_CONTEXT_TOKEN || '' }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY || steps.wif.outputs.token }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ secrets.VIGIL_REVIEW_TOKEN || github.token }}
 
@@ -348,7 +401,7 @@ jobs:
         run: |
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
-      - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
+      - uses: F2iLLC/vigil@6481d8bc7e2cd99ba7152bcd0b17e8ee43f64c2b
         continue-on-error: ${{ inputs.advisory }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
@@ -365,7 +418,7 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
-      - uses: F2iLLC/vigil@ce4df1c9c7cf6dc126fe1f04a4cc02c581e8823e
+      - uses: F2iLLC/vigil@6481d8bc7e2cd99ba7152bcd0b17e8ee43f64c2b
         continue-on-error: ${{ inputs.advisory }}
         with:
           command: resolve-addressed
