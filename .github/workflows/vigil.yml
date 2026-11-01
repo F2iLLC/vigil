@@ -50,5 +50,5 @@ jobs:
       # Anthropic via workload identity federation (no stored API key); the
       # IDs live in the ANTHROPIC_* Actions variables.
       model: claude-sonnet-5-5
-      runner-json: '["ubuntu-latest"]' # TEMP: testing the WIF exchange; ci-general runner is not picking up jobs
+      runner-json: '["self-hosted","linux","x64","ci-light"]'
     secrets: inherit
