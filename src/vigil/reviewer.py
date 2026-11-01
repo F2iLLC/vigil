@@ -47,20 +47,20 @@ def _parse_json_response(text: str) -> dict:
     except json.JSONDecodeError:
         pass
 
-    # Handle trailing text after valid JSON (common with some models)
-    # Find the last closing brace and try parsing up to there
-    depth = 0
-    end = -1
-    for i, ch in enumerate(text):
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    if end > 0:
-        return json.loads(text[:end])
+    # Handle prose before and/or after the JSON object (common with some models,
+    # which answer 'Here is the verdict:' and then the object): decode the first
+    # valid JSON object found at any opening brace in the reply.
+    decoder = json.JSONDecoder()
+    pos = text.find("{")
+    while pos != -1:
+        try:
+            obj, _ = decoder.raw_decode(text, pos)
+        except json.JSONDecodeError:
+            pos = text.find("{", pos + 1)
+            continue
+        if isinstance(obj, dict):
+            return obj
+        pos = text.find("{", pos + 1)
 
     raise json.JSONDecodeError("No valid JSON object found", text, 0)
 

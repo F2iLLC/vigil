@@ -78,12 +78,20 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write # Anthropic workload identity federation (OIDC)
 
 jobs:
   review:
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 20
+    # id-token is requested by this job only (Anthropic workload identity
+    # federation). A caller that uses this workflow must grant it to the calling
+    # job, e.g. `permissions: {contents: read, pull-requests: write, issues: write,
+    # id-token: write}`; the dismiss and resolve-addressed jobs do not need it.
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
     concurrency:
       group: vigil-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
