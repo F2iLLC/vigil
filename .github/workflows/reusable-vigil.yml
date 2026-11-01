@@ -317,7 +317,7 @@ jobs:
       # all — versus consumers calling the composite action directly at
       # `@v1` the way every current consumer does — is an open owner
       # decision tracked in F2iLLC/vigil#88; this comment does not decide it.
-      - uses: F2iLLC/vigil@84b2eb59f0b8d3996b18cc58a4a359816deb20ae
+      - uses: F2iLLC/vigil@92b2718ba94ee7a03e3515a0157b2ae3a7804e54
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory }}
         with:
@@ -399,7 +399,7 @@ jobs:
         run: |
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
-      - uses: F2iLLC/vigil@84b2eb59f0b8d3996b18cc58a4a359816deb20ae
+      - uses: F2iLLC/vigil@92b2718ba94ee7a03e3515a0157b2ae3a7804e54
         continue-on-error: ${{ inputs.advisory }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
@@ -416,7 +416,7 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
-      - uses: F2iLLC/vigil@84b2eb59f0b8d3996b18cc58a4a359816deb20ae
+      - uses: F2iLLC/vigil@92b2718ba94ee7a03e3515a0157b2ae3a7804e54
         continue-on-error: ${{ inputs.advisory }}
         with:
           command: resolve-addressed
