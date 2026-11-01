@@ -372,6 +372,17 @@ jobs:
     secrets: inherit
 ```
 
+**Anthropic without a stored key (optional).** To authenticate to Anthropic with
+workload identity federation instead of an `ANTHROPIC_API_KEY` secret, add
+`id-token: write` to the caller's `permissions:` and set the Actions variables
+`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
+`ANTHROPIC_SERVICE_ACCOUNT_ID` and `ANTHROPIC_WORKSPACE_ID` (repo or org
+level). The workflow then exchanges the run's GitHub OIDC token for a
+short-lived Anthropic token. Callers that use a static key, Gemini or OpenAI
+need no change and are not asked for `id-token`. A federation rule must trust
+`repo:<owner>/*` and must not restrict `event_name` to `push`, since reviews run
+on `pull_request` and `issue_comment`.
+
 The caller follows `main` so reviewed workflow fixes propagate to every consumer without copying the full YAML. If immutable workflow provenance is more important than automatic propagation, replace `@main` with a full commit SHA and update that pin intentionally.
 
 The centralized workflow provides:

@@ -74,24 +74,19 @@ on:
       VIGIL_CONTEXT_TOKEN:
         required: false
 
-permissions:
-  contents: read
-  pull-requests: write
-  issues: write
+# No `permissions:` here on purpose. A reusable workflow can only keep or reduce
+# the permissions its caller grants, so declaring them here would make
+# `id-token` impossible to opt into. Jobs run with the CALLER's permissions.
+# The caller must grant `contents: read`, `pull-requests: write` and
+# `issues: write` (as before). To use Anthropic workload identity federation
+# instead of a stored ANTHROPIC_API_KEY, it must also grant `id-token: write`
+# and have the four ANTHROPIC_* Actions variables set; callers that use a
+# static key need no change.
 
 jobs:
   review:
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 20
-    # id-token is requested by this job only (Anthropic workload identity
-    # federation). A caller that uses this workflow must grant it to the calling
-    # job, e.g. `permissions: {contents: read, pull-requests: write, issues: write,
-    # id-token: write}`; the dismiss and resolve-addressed jobs do not need it.
-    permissions:
-      contents: read
-      pull-requests: write
-      issues: write
-      id-token: write
     concurrency:
       group: vigil-review-${{ github.repository }}-${{ github.event.pull_request.number || github.event.issue.number }}
       cancel-in-progress: true
@@ -139,6 +134,9 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
           missing=()
@@ -153,10 +151,10 @@ jobs:
               claude-*|anthropic/*)
                 if [ -n "$ANTHROPIC_API_KEY" ]; then
                   :
-                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ]; then
+                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
                   use_wif=true
                 else
-                  missing+=("ANTHROPIC_API_KEY or ANTHROPIC_FEDERATION_RULE_ID")
+                  missing+=("ANTHROPIC_API_KEY (or all four ANTHROPIC_FEDERATION_RULE_ID / _ORGANIZATION_ID / _SERVICE_ACCOUNT_ID / _WORKSPACE_ID variables)")
                 fi
                 ;;
               gpt-*|o[0-9]-*|openai/*)
@@ -285,6 +283,10 @@ jobs:
           WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
         run: |
           set -euo pipefail
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
+            echo "::error::No GitHub OIDC token is available. To use Anthropic workload identity federation the calling workflow must grant 'id-token: write' (or set a static ANTHROPIC_API_KEY secret)."
+            exit 1
+          fi
           JWT="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r .value)"
           echo "::add-mask::$JWT"
           # Non-secret claims only, so a federation-rule mismatch is diagnosable.
