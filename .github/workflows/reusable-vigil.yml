@@ -279,8 +279,16 @@ jobs:
           set -euo pipefail
           JWT="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r .value)"
           echo "::add-mask::$JWT"
-          TOKEN="$(jq -n --arg jwt "$JWT" --arg rule "$FEDERATION_RULE_ID"               --arg org "$ORGANIZATION_ID" --arg sa "$SERVICE_ACCOUNT_ID" --arg ws "$WORKSPACE_ID"               '{grant_type:"urn:ietf:params:oauth:grant-type:jwt-bearer",assertion:$jwt,
-                federation_rule_id:$rule,organization_id:$org,service_account_id:$sa,workspace_id:$ws}'             | curl -fsS https://api.anthropic.com/v1/oauth/token                 -H "content-type: application/json" --data @- | jq -r .access_token)"
+          # Non-secret claims only, so a federation-rule mismatch is diagnosable.
+          echo "OIDC claims: $(cut -d. -f2 <<<"$JWT" | tr '_-' '/+' | base64 -d 2>/dev/null | jq -c '{iss,sub,aud,repository,repository_owner,ref,event_name}' 2>/dev/null || echo unreadable)"
+          BODY="$(mktemp)"
+          CODE="$(jq -n --arg jwt "$JWT" --arg rule "$FEDERATION_RULE_ID"               --arg org "$ORGANIZATION_ID" --arg sa "$SERVICE_ACCOUNT_ID" --arg ws "$WORKSPACE_ID"               '{grant_type:"urn:ietf:params:oauth:grant-type:jwt-bearer",assertion:$jwt,
+                federation_rule_id:$rule,organization_id:$org,service_account_id:$sa,workspace_id:$ws}'             | curl -sS -o "$BODY" -w '%{http_code}' https://api.anthropic.com/v1/oauth/token                 -H "content-type: application/json" --data @-)"
+          if [ "$CODE" != "200" ]; then
+            echo "::error::Anthropic token exchange failed: HTTP $CODE: $(head -c 600 "$BODY")"
+            exit 1
+          fi
+          TOKEN="$(jq -r .access_token "$BODY")"
           echo "::add-mask::$TOKEN"
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
