@@ -16,6 +16,7 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 jobs:
   vigil:
@@ -46,5 +47,8 @@ jobs:
     if: vars.VIGIL_SKIP != 'true'
     uses: ./.github/workflows/reusable-vigil.yml
     with:
+      # Anthropic via workload identity federation (no stored API key); the
+      # IDs live in the ANTHROPIC_* Actions variables.
+      model: claude-sonnet-5-5
       runner-json: '["self-hosted","linux","x64","ci-general"]'
     secrets: inherit
