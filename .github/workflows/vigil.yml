@@ -16,7 +16,6 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   vigil:
@@ -47,8 +46,6 @@ jobs:
     if: vars.VIGIL_SKIP != 'true'
     uses: ./.github/workflows/reusable-vigil.yml
     with:
-      # Anthropic via workload identity federation (no stored API key); the
-      # IDs live in the ANTHROPIC_* Actions variables.
-      model: claude-sonnet-5-5
+      model: gemini/gemini-3.1-flash-lite
       runner-json: '["ubuntu-latest"]' # public repo: never self-hosted (a fork PR could run code on our servers). Private repos use ci-light.
     secrets: inherit
