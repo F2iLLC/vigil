@@ -322,7 +322,7 @@ jobs:
       # decision tracked in F2iLLC/vigil#88; this comment does not decide it.
       - uses: F2iLLC/vigil@450757fc5595c3d9b285a275933832ff38a2cb4b
         if: steps.provider.outputs.has_key == 'true'
-        continue-on-error: ${{ inputs.advisory }}
+        continue-on-error: ${{ inputs.advisory == true }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           force: ${{ steps.pr.outputs.force }}
