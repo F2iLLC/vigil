@@ -271,8 +271,8 @@ jobs:
       # token for a short-lived Anthropic access token (sk-ant-oat...), which
       # LiteLLM sends as a Bearer credential. Prefer federation whenever all four
       # variables are configured; use ANTHROPIC_API_KEY only when federation is absent.
-      # Fork PRs get no OIDC token, so a failure here is non-fatal and the
-      # review then reports the missing credential.
+      # A failed exchange stops the job; no static key is used while
+      # federation is configured.
       - name: Exchange GitHub OIDC token for Anthropic access token
         id: wif
         if: steps.provider.outputs.has_key == 'true' && steps.provider.outputs.use_wif == 'true'
