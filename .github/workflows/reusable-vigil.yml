@@ -149,10 +149,12 @@ jobs:
                 [ -n "$GEMINI_API_KEY" ] || missing+=("GEMINI_API_KEY")
                 ;;
               claude-*|anthropic/*)
-                if [ -n "$ANTHROPIC_API_KEY" ]; then
-                  :
-                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
+                if [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
                   use_wif=true
+                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] || [ -n "$ANTHROPIC_ORGANIZATION_ID" ] || [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] || [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
+                  missing+=("all four Anthropic federation variables (partial federation configuration is not allowed to fall back to a static key)")
+                elif [ -n "$ANTHROPIC_API_KEY" ]; then
+                  :
                 else
                   missing+=("ANTHROPIC_API_KEY (or all four ANTHROPIC_FEDERATION_RULE_ID / _ORGANIZATION_ID / _SERVICE_ACCOUNT_ID / _WORKSPACE_ID variables)")
                 fi
@@ -267,14 +269,13 @@ jobs:
 
       # Anthropic workload identity federation: trade this run's GitHub OIDC
       # token for a short-lived Anthropic access token (sk-ant-oat...), which
-      # LiteLLM sends as a Bearer credential. Used only when no static
-      # ANTHROPIC_API_KEY secret exists (see "Check review provider key").
+      # LiteLLM sends as a Bearer credential. Prefer federation whenever all four
+      # variables are configured; use ANTHROPIC_API_KEY only when federation is absent.
       # Fork PRs get no OIDC token, so a failure here is non-fatal and the
       # review then reports the missing credential.
       - name: Exchange GitHub OIDC token for Anthropic access token
         id: wif
         if: steps.provider.outputs.has_key == 'true' && steps.provider.outputs.use_wif == 'true'
-        continue-on-error: true
         shell: bash
         env:
           FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -335,7 +336,7 @@ jobs:
           context-label: ${{ steps.context.outputs.label }}
           context-token: ${{ steps.context.outputs.allowed == 'true' && secrets.VIGIL_CONTEXT_TOKEN || '' }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY || steps.wif.outputs.token }}
+          anthropic-api-key: ${{ steps.provider.outputs.use_wif == 'true' && steps.wif.outputs.token || (steps.provider.outputs.use_wif != 'true' && secrets.ANTHROPIC_API_KEY) }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ secrets.VIGIL_REVIEW_TOKEN || github.token }}
 
