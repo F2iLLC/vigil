@@ -25,12 +25,14 @@ from .comment_manager import (
 )
 from .decision_log import clear_decisions, get_decisions, remove_decision
 from .diff_parser import commentable_lines, parse_diff
+from .diff_guard import prepare_diff
 from .finding_validation import validate_findings_against_head
 from .github import (
     get_changed_files_between_commits,
     get_pr_data,
     is_ancestor_commit,
     parse_pr_url,
+    post_diff_limit_comment,
 )
 from .github_review import post_review, react, remove_reaction
 from .issue_manager import create_issues_for_observations
@@ -286,6 +288,55 @@ def review(
         console.print(f"[red]Error fetching PR:[/red] {e}")
         raise typer.Exit(1)
 
+    # Bound the complete PR context before fetching thread history, reacting,
+    # routing specialists, or making any model call (F2iLLC/vigil#127).
+    try:
+        prepared_diff = prepare_diff(pr_data["diff"])
+    except ValueError as e:
+        print(f"::error title=Vigil diff guard configuration::{e}")
+        raise typer.Exit(1)
+    after_excludes = prepared_diff.filtered_bytes
+    console.print(
+        f"[dim]Diff guard: {prepared_diff.original_bytes:,} bytes before excludes, "
+        f"{after_excludes:,} after excludes, {prepared_diff.prepared_bytes:,} sent "
+        f"(about {prepared_diff.estimated_tokens:,} diff tokens); "
+        f"limits {prepared_diff.max_diff_bytes:,} total / "
+        f"{prepared_diff.max_file_bytes:,} per file[/dim]"
+    )
+    if prepared_diff.excluded_files:
+        console.print(
+            f"[dim]Excluded {len(prepared_diff.excluded_files)} generated file(s): "
+            f"{', '.join(prepared_diff.excluded_files[:8])}"
+            f"{' …' if len(prepared_diff.excluded_files) > 8 else ''}[/dim]"
+        )
+    if prepared_diff.stubbed_files:
+        console.print(
+            f"[dim]Stubbed {len(prepared_diff.stubbed_files)} oversized file diff(s)[/dim]"
+        )
+    if prepared_diff.over_limit:
+        message = (
+            "NO REVIEW WAS POSTED for this PR. Vigil stopped before any model call because "
+            f"the filtered diff measures {prepared_diff.filtered_bytes:,} bytes "
+            "before per-file stubs, above the "
+            f"{prepared_diff.max_diff_bytes:,}-byte limit. Add generated paths to "
+            "`.vigil/ignore`, adjust `max-diff-bytes` / `VIGIL_MAX_DIFF_BYTES` for this "
+            "repository, or split the PR."
+        )
+        print(f"::error title=Vigil diff exceeds configured limit::{message}")
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            try:
+                with open(summary_path, "a", encoding="utf-8") as summary:
+                    summary.write("\n### :rotating_light: Vigil did not review this PR\n\n")
+                    summary.write(message + "\n")
+            except OSError:
+                pass
+        if post:
+            posted = post_diff_limit_comment(owner, repo, pr_number, token, message)
+            if not posted:
+                console.print("[yellow]Could not post the diff-limit PR comment (best effort)[/yellow]")
+        raise typer.Exit(1)
+
     console.print(f"[bold]{pr_data['title']}[/bold]")
     console.print(
         f"[dim]{pr_data['author']} · "
@@ -317,7 +368,7 @@ def review(
     outstanding_blocks: list[dict] = []
     settled_verdict_at_head = True
     existing_comments: list[dict] = []
-    review_diff_text = pr_data["diff"]
+    review_diff_text = prepared_diff.diff
 
     if post:
         try:
@@ -402,13 +453,13 @@ def review(
             # The full diff is against the base branch (e.g., main), so it includes
             # all changes from all commits, which is what we want. This holds for
             # every re-review path above, including the no-new-commits ones.
-            review_diff_text = pr_data["diff"]
+            review_diff_text = prepared_diff.diff
 
         except typer.Exit:
             raise
         except Exception as e:
             console.print(f"[dim yellow]Incremental diff failed (force-push?), falling back to full review: {e}[/dim yellow]")
-            review_diff_text = pr_data["diff"]
+            review_diff_text = prepared_diff.diff
 
         # Fetch existing comments for deduplication (incl. resolved threads)
         try:

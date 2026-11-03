@@ -6,6 +6,30 @@ from urllib.parse import quote
 import httpx
 
 
+DIFF_LIMIT_COMMENT_MARKER = "<!-- vigil-did-not-run -->"
+
+
+def post_diff_limit_comment(owner: str, repo: str, pr_number: int, token: str, body: str) -> bool:
+    """Post one explanatory issue comment when the diff exceeds the safe cap."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    try:
+        with httpx.Client(timeout=10) as client:
+            response = client.get(url, headers=headers, params={"per_page": 100})
+            response.raise_for_status()
+            if any(DIFF_LIMIT_COMMENT_MARKER in item.get("body", "") for item in response.json()):
+                return True
+            response = client.post(url, headers=headers, json={"body": f"{body}\n\n{DIFF_LIMIT_COMMENT_MARKER}"})
+            response.raise_for_status()
+            return True
+    except Exception:
+        return False
+
+
 def parse_pr_url(url: str) -> tuple[str, str, int]:
     """Extract owner, repo, pr_number from a GitHub PR URL."""
     match = re.match(r"https://github\.com/([^/]+)/([^/]+)/pull/(\d+)", url)
