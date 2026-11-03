@@ -65,8 +65,6 @@ on:
     secrets:
       GEMINI_API_KEY:
         required: false
-      ANTHROPIC_API_KEY:
-        required: false
       OPENAI_API_KEY:
         required: false
       VIGIL_REVIEW_TOKEN:
@@ -78,10 +76,9 @@ on:
 # the permissions its caller grants, so declaring them here would make
 # `id-token` impossible to opt into. Jobs run with the CALLER's permissions.
 # The caller must grant `contents: read`, `pull-requests: write` and
-# `issues: write` (as before). To use Anthropic workload identity federation
-# instead of a stored ANTHROPIC_API_KEY, it must also grant `id-token: write`
-# and have the four ANTHROPIC_* Actions variables set; callers that use a
-# static key need no change.
+# `issues: write` (as before). Anthropic reviews require workload identity
+# federation: callers must grant `id-token: write` and set all four
+# ANTHROPIC_* Actions variables. Other provider keys are unchanged.
 
 jobs:
   review:
@@ -132,7 +129,6 @@ jobs:
           MODEL: ${{ inputs.model }}
           LEAD_MODEL: ${{ inputs.lead-model }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
           ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
           ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
@@ -149,12 +145,12 @@ jobs:
                 [ -n "$GEMINI_API_KEY" ] || missing+=("GEMINI_API_KEY")
                 ;;
               claude-*|anthropic/*)
-                if [ -n "$ANTHROPIC_API_KEY" ]; then
-                  :
-                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
+                if [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
                   use_wif=true
+                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] || [ -n "$ANTHROPIC_ORGANIZATION_ID" ] || [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] || [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
+                  missing+=("all four Anthropic federation variables (partial configuration is invalid; static API keys are disabled)")
                 else
-                  missing+=("ANTHROPIC_API_KEY (or all four ANTHROPIC_FEDERATION_RULE_ID / _ORGANIZATION_ID / _SERVICE_ACCOUNT_ID / _WORKSPACE_ID variables)")
+                  missing+=("all four Anthropic federation variables (static API keys are disabled)")
                 fi
                 ;;
               gpt-*|o[0-9]-*|openai/*)
@@ -267,14 +263,12 @@ jobs:
 
       # Anthropic workload identity federation: trade this run's GitHub OIDC
       # token for a short-lived Anthropic access token (sk-ant-oat...), which
-      # LiteLLM sends as a Bearer credential. Used only when no static
-      # ANTHROPIC_API_KEY secret exists (see "Check review provider key").
-      # Fork PRs get no OIDC token, so a failure here is non-fatal and the
-      # review then reports the missing credential.
+      # LiteLLM sends as a Bearer credential. Prefer federation whenever all four
+      # all four federation variables are configured; static Anthropic API keys are disabled.
+      # A failed exchange stops the job.
       - name: Exchange GitHub OIDC token for Anthropic access token
         id: wif
         if: steps.provider.outputs.has_key == 'true' && steps.provider.outputs.use_wif == 'true'
-        continue-on-error: true
         shell: bash
         env:
           FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
@@ -284,7 +278,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "::error::No GitHub OIDC token is available. To use Anthropic workload identity federation the calling workflow must grant 'id-token: write' (or set a static ANTHROPIC_API_KEY secret)."
+            echo "::error::No GitHub OIDC token is available. Anthropic reviews require workload identity federation and the calling workflow must grant 'id-token: write'."
             exit 1
           fi
           JWT="$(curl -fsS -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN"             "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" | jq -r .value)"
@@ -321,7 +315,7 @@ jobs:
       # decision tracked in F2iLLC/vigil#88; this comment does not decide it.
       - uses: F2iLLC/vigil@450757fc5595c3d9b285a275933832ff38a2cb4b
         if: steps.provider.outputs.has_key == 'true'
-        continue-on-error: ${{ inputs.advisory }}
+        continue-on-error: ${{ inputs.advisory == true }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
           force: ${{ steps.pr.outputs.force }}
@@ -335,7 +329,7 @@ jobs:
           context-label: ${{ steps.context.outputs.label }}
           context-token: ${{ steps.context.outputs.allowed == 'true' && secrets.VIGIL_CONTEXT_TOKEN || '' }}
           gemini-api-key: ${{ secrets.GEMINI_API_KEY }}
-          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY || steps.wif.outputs.token }}
+          anthropic-api-key: ${{ steps.wif.outputs.token }}
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           github-token: ${{ secrets.VIGIL_REVIEW_TOKEN || github.token }}
 
