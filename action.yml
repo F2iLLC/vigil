@@ -31,6 +31,21 @@ inputs:
     description: "Review even when no files changed since the last review (set for on-demand '/vigil review')"
     required: false
     default: "false"
+  max-diff-bytes:
+    description: "Maximum filtered PR diff size in bytes before Vigil refuses the review (default 204800)"
+    required: false
+    default: "204800"
+  max-file-bytes:
+    description: "Maximum diff bytes sent for one file before replacing it with a size stub (default 51200)"
+    required: false
+    default: "51200"
+  diff-ignore:
+    description: >-
+      Additional newline-separated glob patterns to exclude from model context.
+      Default generated-path exclusions always apply; .vigil/ignore in the
+      caller repository can also add exclusions.
+    required: false
+    default: ""
   reason:
     description: "Why this review was requested; recorded in the run log"
     required: false
@@ -166,6 +181,9 @@ runs:
         # a shell-injection surface.
         VIGIL_FORCE: ${{ inputs.force }}
         VIGIL_REASON: ${{ inputs.reason }}
+        VIGIL_MAX_DIFF_BYTES: ${{ inputs.max-diff-bytes }}
+        VIGIL_MAX_FILE_BYTES: ${{ inputs.max-file-bytes }}
+        VIGIL_DIFF_IGNORE: ${{ inputs.diff-ignore }}
         # External review context (F2iLLC/vigil#47). Env only, never
         # interpolated into the script body: the provider is an
         # operator-supplied command string and `${{ }}` inside `run:` is a

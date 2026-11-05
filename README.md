@@ -435,6 +435,9 @@ Available inputs:
 | `profile` | `default` | `default` or `enterprise` |
 | `force` | `false` | Review even when no files changed since the last review; the reusable workflow sets this for on-demand `/vigil review` |
 | `reason` | Empty | Why the review was requested; recorded in the run log |
+| `max-diff-bytes` | `204800` | Refuse the review before any model call when the filtered PR diff exceeds this byte limit |
+| `max-file-bytes` | `51200` | Replace a larger individual file diff with a one-line size stub in model context |
+| `diff-ignore` | Empty | Additional newline-separated glob patterns to exclude; default generated paths remain excluded |
 | `context-provider` | Empty | Command or `http(s)` endpoint supplying [external review context](#external-review-context). Never pass this on a fork pull request; the reusable workflow gates it off automatically, a direct caller must gate it itself |
 | `context-label` | Empty | Short label naming the external context source, shown to reviewers |
 | `context-token` | Empty | One opaque token for the external context provider (`VIGIL_CONTEXT_TOKEN` env for a command, `X-Vigil-Context-Token` header for HTTP). Fork-gated the same way |
@@ -450,6 +453,8 @@ Outputs:
 | `review-ran` | `true` / `false` | `false` when the venv install or the Run Vigil step did not complete successfully, meaning the requested command (review, dismiss-resolved, or resolve-addressed) never actually executed. A caller can check this explicitly to gate on a real completed review rather than on the job's (possibly advisory-wrapped) conclusion. |
 
 The action uses a suitable system Python 3.10+ when available and falls back to `actions/setup-python`. It installs Vigil into an isolated virtual environment under the runner temporary directory.
+
+Before any model call, Vigil excludes generated output (`dist`, `build`, minified files, built site `index.html`, evidence JSON, and lockfiles), applies additional patterns from `.vigil/ignore` in the caller repository and the `diff-ignore` action input, and logs original, filtered, and sent diff sizes with a rough estimate of diff tokens in the prompt. Diffs over `max-diff-bytes` stop with a hard workflow error and a best-effort explanatory PR comment; no review is posted. Individual files over `max-file-bytes` are represented by a size stub after the total diff limit is checked. The equivalent CLI environment variables are `VIGIL_MAX_DIFF_BYTES`, `VIGIL_MAX_FILE_BYTES`, and newline-separated `VIGIL_DIFF_IGNORE`.
 
 ### Advisory mode and loud failure
 
