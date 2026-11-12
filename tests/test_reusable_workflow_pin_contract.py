@@ -113,3 +113,34 @@ def test_reusable_workflow_no_longer_claims_inputs_are_inert_at_the_pin() -> Non
     assert "stay\nINERT" not in text
     assert "stay INERT" not in text
     assert "INERT until this pin is advanced" not in text
+
+
+def test_pinned_action_includes_the_diff_size_guard() -> None:
+    """The pinned action must contain ``src/vigil/diff_guard.py``.
+
+    The guard (#127/#128) was merged to main while this workflow still pinned
+    an older action SHA, so consumers on a post-guard reusable-workflow SHA
+    silently ran guard-less code and a 3.2 MB PR overflowed the model's
+    context window (lunaos-home#363). Skips when git history is unavailable
+    (shallow clone or no .git).
+    """
+    import subprocess
+
+    workflow = load_yaml(REUSABLE_WORKFLOW)
+    pins = {step["uses"].split("@", 1)[1] for step in iter_vigil_pin_steps(workflow)}
+    assert len(pins) == 1
+    sha = pins.pop()
+    probe = subprocess.run(
+        ["git", "cat-file", "-e", f"{sha}^{{commit}}"],
+        cwd=REPO_ROOT, capture_output=True,
+    )
+    if probe.returncode != 0:
+        pytest.skip(f"pinned commit {sha} not present in this clone (shallow?)")
+    has_guard = subprocess.run(
+        ["git", "cat-file", "-e", f"{sha}:src/vigil/diff_guard.py"],
+        cwd=REPO_ROOT, capture_output=True,
+    )
+    assert has_guard.returncode == 0, (
+        f"pinned action {sha} predates the diff-size guard (src/vigil/diff_guard.py); "
+        "advance the pin"
+    )
