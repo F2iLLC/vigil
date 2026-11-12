@@ -299,21 +299,20 @@ jobs:
       # Pin the composite action independently from this reusable workflow.
       # Update this one reference when a reviewed Vigil implementation lands.
       #
-      # NOTE: this pin does not follow `v1` and is currently behind `main`
-      # (see the "Tag drift check" workflow / F2iLLC/vigil#88 for the current
-      # gap). That said, the action's *input surface* at this pinned SHA is
-      # byte-identical to `main`'s `action.yml`, so the `force` / `reason`
-      # inputs below (F2iLLC/vigil#49) and `context-provider` /
-      # `context-label` / `context-token` (F2iLLC/vigil#47) are all declared
-      # at this pin and are LIVE here, not inert. What the 6 commits of drift
-      # actually change is review logic (src/vigil/**), not this action's
-      # declared inputs. The fork gate above still evaluates regardless, so
-      # advancing the pin cannot quietly expose a provider to a fork PR.
+      # NOTE: this pin does not follow `v1`, so it must be advanced by hand
+      # whenever a fix that matters to reviews lands (F2iLLC/vigil#88). It
+      # sat at 450757fc for a week after the diff-size guard (#127/#128)
+      # merged, so consumers calling this workflow at a post-guard SHA still
+      # ran guard-less code and a 3.2 MB PR (lunaos-home#363) overflowed the
+      # model's context window. tests/test_reusable_workflow_pin_contract.py
+      # now fails if the pin lacks src/vigil/diff_guard.py. The fork gate
+      # above still evaluates regardless, so advancing the pin cannot quietly
+      # expose a provider to a fork PR.
       # Whether this reusable workflow remains a supported adoption path at
       # all — versus consumers calling the composite action directly at
       # `@v1` the way every current consumer does — is an open owner
       # decision tracked in F2iLLC/vigil#88; this comment does not decide it.
-      - uses: F2iLLC/vigil@450757fc5595c3d9b285a275933832ff38a2cb4b
+      - uses: F2iLLC/vigil@06b99289d029b6f0a6c52a2501652a3c5d35b24b
         if: steps.provider.outputs.has_key == 'true'
         continue-on-error: ${{ inputs.advisory == true }}
         with:
@@ -395,7 +394,7 @@ jobs:
         run: |
           echo "url=${{ github.event.pull_request.html_url || github.event.issue.pull_request.html_url }}" >> "$GITHUB_OUTPUT"
 
-      - uses: F2iLLC/vigil@450757fc5595c3d9b285a275933832ff38a2cb4b
+      - uses: F2iLLC/vigil@06b99289d029b6f0a6c52a2501652a3c5d35b24b
         continue-on-error: ${{ inputs.advisory }}
         with:
           pr-url: ${{ steps.pr.outputs.url }}
@@ -412,7 +411,7 @@ jobs:
       github.event.action == 'synchronize' &&
       github.event.pull_request.draft == false
     steps:
-      - uses: F2iLLC/vigil@450757fc5595c3d9b285a275933832ff38a2cb4b
+      - uses: F2iLLC/vigil@06b99289d029b6f0a6c52a2501652a3c5d35b24b
         continue-on-error: ${{ inputs.advisory }}
         with:
           command: resolve-addressed
