@@ -901,7 +901,9 @@ def review_diff(
         except Exception:
             pass  # alerting is best-effort, never blocks the review
 
-    # --- Step 2: Lead review (gets file summary + specialist verdicts, not full diff) ---
+    # --- Step 2: Lead review (receives the same full-diff PR block as the specialists,
+    # plus their verdicts). Its size is bounded only by the upstream diff guard
+    # (diff_guard.py); never feed this stage an unguarded diff. ---
     decision, summary, lead_findings = _run_lead_review(
         profile.lead_prompt, lead_pr_block, verdicts, lead_model,
         cache=_reused(lead_model, lead_pr_block),
