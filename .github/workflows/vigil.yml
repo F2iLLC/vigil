@@ -7,6 +7,9 @@ name: Vigil PR Review
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  # Dependabot reviews use the base-branch context so Actions secrets are available.
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
   pull_request_review_comment:
     types: [created]
   issue_comment:
