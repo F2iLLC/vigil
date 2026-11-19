@@ -258,11 +258,16 @@ def test_caller_workflow_records_why_vigil_is_skipped():
         )
 
 
-def _readme_section(heading: str) -> str:
+def _readme_section(heading: str, readme: str | None = None) -> str:
     """Return README text under ``heading`` up to the next same-or-higher heading,
-    ignoring ``#`` lines inside fenced code blocks."""
+    ignoring ``#`` lines inside fenced code blocks.
+
+    ``readme`` defaults to this repository's README; passing other text lets a
+    caller point the same slicing logic at a copy (used to prove these
+    assertions can fail).
+    """
     level = len(heading.split(" ", 1)[0])
-    lines = README.splitlines()
+    lines = (README if readme is None else readme).splitlines()
     start = lines.index(heading) + 1
     in_fence = False
     for end in range(start, len(lines)):
@@ -303,12 +308,51 @@ def test_reusable_workflow_anthropic_federation_is_required_not_optional():
         assert var in paragraph
 
 
-def test_reusable_workflow_secrets_table_does_not_require_anthropic_api_key():
-    section = _readme_section("### Central reusable workflow")
+ANTHROPIC_FEDERATION_VARIABLES = (
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_WORKSPACE_ID",
+)
+
+
+def _check_reusable_credential_table(readme: str | None = None) -> None:
+    """Assert the reusable-workflow credential table's Claude contract.
+
+    Factored out of the test so the same logic can be pointed at a modified
+    copy of the README to prove it fails.
+    """
+    section = _readme_section("### Central reusable workflow", readme)
     rows = [line for line in section.splitlines() if line.startswith("| `")]
     assert not any(row.startswith("| `ANTHROPIC_API_KEY`") for row in rows)
     claude_rows = [row for row in rows if "`claude-*`" in row]
-    assert claude_rows and all("ANTHROPIC_FEDERATION_RULE_ID" in r for r in claude_rows)
+    assert claude_rows, "the credential table must keep a Claude row"
+    for row in claude_rows:
+        for var in ANTHROPIC_FEDERATION_VARIABLES:
+            assert var in row, (
+                f"the Claude credential-table row must name {var} — a partial "
+                "set is an error in reusable-vigil.yml"
+            )
+
+
+def test_reusable_workflow_secrets_table_does_not_require_anthropic_api_key():
+    _check_reusable_credential_table()
+
+
+def test_reusable_workflow_credential_table_intro_names_actions_variables():
+    """The sentence introducing the table must not call every row a secret:
+    the Claude row lists Actions variables, not secrets (F2iLLC/vigil#145)."""
+    section = _readme_section("### Central reusable workflow")
+    intro = next(
+        line
+        for line in section.splitlines()
+        if line.startswith("Set these ") and line.rstrip().endswith(":")
+    )
+    assert "secrets" in intro
+    assert "Actions variables" in intro, (
+        "the table intro must say it also lists Actions variables, since the "
+        f"Claude row's four ANTHROPIC_* values are variables: {intro!r}"
+    )
 
 
 def test_composite_action_still_documents_static_anthropic_key():
