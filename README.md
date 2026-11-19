@@ -372,13 +372,16 @@ jobs:
     secrets: inherit
 ```
 
-**Anthropic without a stored key (optional).** To authenticate to Anthropic with
-workload identity federation instead of an `ANTHROPIC_API_KEY` secret, add
-`id-token: write` to the caller's `permissions:` and set the Actions variables
-`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
+**Claude models require workload identity federation.** The reusable workflow
+uses federation only when `model` or `lead-model` is a `claude-*` or `anthropic/*` model.
+For those models it requires workload identity federation: add
+`id-token: write` to the caller's `permissions:` and set all four Actions
+variables `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
 `ANTHROPIC_SERVICE_ACCOUNT_ID` and `ANTHROPIC_WORKSPACE_ID` (repo or org
-level). The workflow then exchanges the run's GitHub OIDC token for a
-short-lived Anthropic token. Callers that use a static key, Gemini or OpenAI
+level). A partial set is an error, and a static `ANTHROPIC_API_KEY` is not accepted
+by the reusable workflow. The workflow exchanges the run's GitHub OIDC token for a
+short-lived Anthropic token. To review with Claude, also pass the model under
+`with:` (for example `model: claude-sonnet-5-5`). Gemini and OpenAI callers
 need no change and are not asked for `id-token`. A federation rule must trust
 `repo:<owner>/*` and must not restrict `event_name` to `push`, since reviews run
 on `pull_request` and `issue_comment`.
@@ -404,7 +407,7 @@ Set these repository or organization secrets:
 | Secret | Required when | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | Using `gemini/*` | Specialist and lead model calls |
-| `ANTHROPIC_API_KEY` | Using `claude-*` or `anthropic/*` | Specialist or lead model calls |
+| `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` (Actions variables, not secrets) | `model` or `lead-model` is `claude-*` or `anthropic/*` | Workload identity federation for Claude calls; `ANTHROPIC_API_KEY` is not accepted here |
 | `OPENAI_API_KEY` | Using OpenAI models | Specialist or lead model calls |
 | `VIGIL_REVIEW_TOKEN` | Real approval events are required | Submit APPROVE/REQUEST_CHANGES as the reviewer identity |
 | `VIGIL_CONTEXT_TOKEN` | An [external context provider](#external-review-context) needs a credential | One opaque token forwarded to the provider; withheld on fork pull requests |
