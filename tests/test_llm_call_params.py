@@ -153,3 +153,30 @@ def test_fallback_when_helper_absent(caplog, monkeypatch):
     assert len(msgs) == 1
     assert "temperature" in msgs[0] and "function_call" in msgs[0]
     assert "api_key" not in msgs[0]
+
+
+# --- vigil-149: the candidate set comes from LiteLLM's helper, not the fallback ---
+
+
+def test_helper_only_candidate_is_reported_by_name(caplog, monkeypatch):
+    import litellm.utils
+
+    caplog.set_level(logging.WARNING)
+    helper = MagicMock(return_value=["vigil_synthetic_param", "temperature"])
+    monkeypatch.setattr(litellm.utils, "provider_rejectable_params", helper, raising=False)
+    _call(["max_tokens"], temperature=0.2, vigil_synthetic_param=1)
+    helper.assert_called_once()
+    passed = helper.call_args.args[0]
+    assert passed["temperature"] == 0.2 and passed["vigil_synthetic_param"] == 1
+    msgs = _drop_warnings(caplog)
+    assert len(msgs) == 1
+    assert "vigil_synthetic_param" in msgs[0] and "temperature" in msgs[0]
+
+
+def test_helper_only_candidate_not_reported_when_helper_absent(caplog, monkeypatch):
+    import litellm.utils
+
+    caplog.set_level(logging.WARNING)
+    monkeypatch.delattr(litellm.utils, "provider_rejectable_params", raising=False)
+    _call(["max_tokens"], temperature=0.2, vigil_synthetic_param=1)
+    assert all("vigil_synthetic_param" not in m for m in _drop_warnings(caplog))
