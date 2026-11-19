@@ -88,7 +88,10 @@ def _parse_json_response(text: str) -> dict:
     # Anything else (end of text, '"', "'", '}', '{', '[', a digit, other
     # punctuation, or an unquoted 'key:') is object-like and raises, so a
     # malformed unclosed verdict never falls through to a nested object and
-    # becomes APPROVE (F2iLLC/vigil#141).
+    # becomes APPROVE (F2iLLC/vigil#141). The bare word alone is not enough:
+    # the text after the brace, up to the next '{' (or the end), must also hold
+    # none of the JSON tokens '"', "'", ',', '[' or ']'; otherwise it is
+    # object-like and raises (F2iLLC/vigil#147).
     decoder = json.JSONDecoder()
     pos = text.find("{")
     while pos != -1:
@@ -99,7 +102,13 @@ def _parse_json_response(text: str) -> dict:
             if end == -1:
                 rest = text[pos + 1:].lstrip()
                 word = re.match(r"[A-Za-z][A-Za-z0-9_-]*", rest)
-                if not word or re.match(r"\s*:", rest[word.end():]):
+                nxt = text.find("{", pos + 1)
+                span = text[pos + 1:] if nxt == -1 else text[pos + 1:nxt]
+                if (
+                    not word
+                    or re.match(r"\s*:", rest[word.end():])
+                    or re.search(r"[\"',\[\]]", span)
+                ):
                     raise json.JSONDecodeError("Truncated JSON object", text, pos)
                 pos = text.find("{", pos + 1)
                 continue
