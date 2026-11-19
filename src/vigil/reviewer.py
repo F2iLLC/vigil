@@ -57,6 +57,11 @@ def _matching_brace(text: str, start: int) -> int:
     return -1
 
 
+_VERDICT_WORD = re.compile(
+    r"\b(?:decision|findings|approve|request_changes|block)\b", re.IGNORECASE
+)
+
+
 def _parse_json_response(text: str) -> dict:
     """Parse JSON from LLM response, handling code fences and trailing text."""
     text = text.strip()
@@ -91,7 +96,9 @@ def _parse_json_response(text: str) -> dict:
     # becomes APPROVE (F2iLLC/vigil#141). The bare word alone is not enough:
     # the text after the brace, up to the next '{' (or the end), must also hold
     # none of the JSON tokens '"', "'", ',', '[' or ']'; otherwise it is
-    # object-like and raises (F2iLLC/vigil#147).
+    # object-like and raises (F2iLLC/vigil#147). That span must also hold no
+    # verdict word ('decision', 'findings', 'approve', 'request_changes',
+    # 'block' as a whole word, any case); otherwise it raises (F2iLLC/vigil#152).
     decoder = json.JSONDecoder()
     pos = text.find("{")
     while pos != -1:
@@ -108,6 +115,7 @@ def _parse_json_response(text: str) -> dict:
                     not word
                     or re.match(r"\s*:", rest[word.end():])
                     or re.search(r"[\"',\[\]]", span)
+                    or _VERDICT_WORD.search(span)
                 ):
                     raise json.JSONDecodeError("Truncated JSON object", text, pos)
                 pos = text.find("{", pos + 1)
