@@ -402,9 +402,9 @@ The centralized workflow provides:
 - an advisory mode that keeps provider or infrastructure outages from turning into red CI by default (see [Advisory mode and loud failure](#advisory-mode-and-loud-failure)); and
 - a loud-failure guard so an install/run failure is never silently reported as a passing review, even while advisory mode keeps it non-blocking.
 
-Set these repository or organization secrets:
+Set these repository or organization secrets and Actions variables — every row is a secret except the Claude row, whose four `ANTHROPIC_*` values are Actions variables:
 
-| Secret | Required when | Purpose |
+| Secret or variable | Required when | Purpose |
 | --- | --- | --- |
 | `GEMINI_API_KEY` | Using `gemini/*` | Specialist and lead model calls |
 | `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_WORKSPACE_ID` (Actions variables, not secrets) | `model` or `lead-model` is `claude-*` or `anthropic/*` | Workload identity federation for Claude calls; `ANTHROPIC_API_KEY` is not accepted here |
