@@ -72,13 +72,19 @@ on:
       VIGIL_CONTEXT_TOKEN:
         required: false
 
-# No `permissions:` here on purpose. A reusable workflow can only keep or reduce
-# the permissions its caller grants, so declaring them here would make
-# `id-token` impossible to opt into. Jobs run with the CALLER's permissions.
-# The caller must grant `contents: read`, `pull-requests: write` and
-# `issues: write` (as before). Anthropic reviews require workload identity
-# federation: callers must grant `id-token: write` and set all four
-# ANTHROPIC_* Actions variables. Other provider keys are unchanged.
+# No workflow-level `permissions:` here on purpose. A reusable workflow can only
+# keep or reduce the permissions its caller grants, so declaring them here would
+# make `id-token` impossible to opt into. The caller must grant `contents: read`,
+# `pull-requests: write` and `issues: write` (as before). Anthropic reviews
+# require workload identity federation: callers must grant `id-token: write`
+# and set all four ANTHROPIC_* Actions variables. Other provider keys are
+# unchanged.
+#
+# Job-level caps (#116): `dismiss` and `resolve-addressed` are capped at job
+# level to exactly `contents: read`, `pull-requests: write`, `issues: write`.
+# `review` is intentionally NOT capped and runs with the CALLER's permissions:
+# it may need `id-token: write` for Anthropic workload identity federation,
+# and capping it is an owner decision (see #111/#116).
 
 jobs:
   review:
@@ -337,6 +343,10 @@ jobs:
           github-token: ${{ secrets.VIGIL_REVIEW_TOKEN || github.token }}
 
   dismiss:
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 10
     if: >-
@@ -405,6 +415,10 @@ jobs:
           command: dismiss-resolved
 
   resolve-addressed:
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
     runs-on: ${{ fromJSON(inputs.runner-json) }}
     timeout-minutes: 10
     if: >-
