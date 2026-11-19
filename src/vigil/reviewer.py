@@ -80,8 +80,12 @@ def _parse_json_response(text: str) -> dict:
     # valid JSON object found at a top-level opening brace in the reply.
     # A brace that fails to decode is skipped as a whole (to its matching close
     # brace), never re-entered: otherwise a truncated outer verdict falls
-    # through to one of its nested objects (F2iLLC/vigil#110). No matching
-    # close means the reply was cut off, which is an error, not a fallback.
+    # through to one of its nested objects (F2iLLC/vigil#110). A brace with no
+    # matching close is a cut-off reply, an error rather than a fallback, but
+    # only when it plausibly starts a JSON object: the next non-whitespace
+    # character is '"' or '}' (or the text ends). Otherwise it is prose, e.g.
+    # 'Context {placeholder', and the search moves on to the next brace after
+    # it (F2iLLC/vigil#135).
     decoder = json.JSONDecoder()
     pos = text.find("{")
     while pos != -1:
@@ -90,7 +94,11 @@ def _parse_json_response(text: str) -> dict:
         except json.JSONDecodeError:
             end = _matching_brace(text, pos)
             if end == -1:
-                raise json.JSONDecodeError("Truncated JSON object", text, pos)
+                rest = text[pos + 1:].lstrip()
+                if not rest or rest[0] in '"}':
+                    raise json.JSONDecodeError("Truncated JSON object", text, pos)
+                pos = text.find("{", pos + 1)
+                continue
             pos = text.find("{", end + 1)
             continue
         if isinstance(obj, dict):
