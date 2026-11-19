@@ -333,16 +333,32 @@ def _report_dropped_params(model: str, kwargs: dict) -> None:
     Best-effort: if support cannot be determined, or the check itself fails,
     nothing is reported and the review proceeds.
     """
+    # Fallback for LiteLLM versions without provider_rejectable_params (pyproject
+    # allows litellm>=1.0); the live candidate set comes from LiteLLM itself.
     model_params = (
         "temperature", "top_p", "n", "stop", "max_tokens", "max_completion_tokens",
         "presence_penalty", "frequency_penalty", "logit_bias", "seed", "response_format",
         "tools", "tool_choice", "parallel_tool_calls", "logprobs", "top_logprobs",
-        "reasoning_effort", "user",
+        "reasoning_effort", "user", "functions", "function_call",
     )
+    # Keys LiteLLM never validates as model params, so they are never dropped:
+    # get_optional_params() skips model/custom_llm_provider/api_version/drop_params/
+    # allowed_openai_params/additional_drop_params and the endpoint-specific
+    # "messages"; metadata is consumed as a litellm_param, not a provider param.
+    never_dropped = frozenset({
+        "drop_params", "allowed_openai_params", "additional_drop_params",
+        "messages", "model", "custom_llm_provider", "api_version", "metadata",
+    })
     try:
         import litellm
+        import litellm.utils
 
-        passed = [name for name in model_params if name in kwargs]
+        rejectable = getattr(litellm.utils, "provider_rejectable_params", None)
+        if rejectable is not None:
+            candidates = set(rejectable(kwargs)) - never_dropped
+            passed = sorted(candidates)
+        else:
+            passed = [name for name in model_params if name in kwargs]
         if not passed:
             return
         supported = litellm.get_supported_openai_params(model=model)
