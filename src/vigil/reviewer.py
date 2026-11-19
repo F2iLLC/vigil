@@ -81,11 +81,14 @@ def _parse_json_response(text: str) -> dict:
     # A brace that fails to decode is skipped as a whole (to its matching close
     # brace), never re-entered: otherwise a truncated outer verdict falls
     # through to one of its nested objects (F2iLLC/vigil#110). A brace with no
-    # matching close is a cut-off reply, an error rather than a fallback, but
-    # only when it plausibly starts a JSON object: the next non-whitespace
-    # character is '"' or '}' (or the text ends). Otherwise it is prose, e.g.
-    # 'Context {placeholder', and the search moves on to the next brace after
-    # it (F2iLLC/vigil#135).
+    # matching close is a cut-off reply, an error rather than a fallback. It is
+    # prose only when the next non-whitespace text is a bare word starting with
+    # a letter that is not followed by ':' -- e.g. 'Context {placeholder'; then
+    # the search moves on to the next brace after it (F2iLLC/vigil#135).
+    # Anything else (end of text, '"', "'", '}', '{', '[', a digit, other
+    # punctuation, or an unquoted 'key:') is object-like and raises, so a
+    # malformed unclosed verdict never falls through to a nested object and
+    # becomes APPROVE (F2iLLC/vigil#141).
     decoder = json.JSONDecoder()
     pos = text.find("{")
     while pos != -1:
@@ -95,7 +98,8 @@ def _parse_json_response(text: str) -> dict:
             end = _matching_brace(text, pos)
             if end == -1:
                 rest = text[pos + 1:].lstrip()
-                if not rest or rest[0] in '"}':
+                word = re.match(r"[A-Za-z][A-Za-z0-9_-]*", rest)
+                if not word or re.match(r"\s*:", rest[word.end():]):
                     raise json.JSONDecodeError("Truncated JSON object", text, pos)
                 pos = text.find("{", pos + 1)
                 continue
