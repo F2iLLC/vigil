@@ -94,3 +94,44 @@ def test_unmatched_brace_followed_by_digit_raises():
     # vigil #141
     with pytest.raises(json.JSONDecodeError):
         _parse_json_response('{1, "nested": {"decision":"APPROVE","findings":[]}')
+
+
+def test_unmatched_brace_bare_word_then_quoted_value_raises():
+    # vigil #147: reviewer's example; only the first word looked like prose.
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            '{decision "REQUEST_CHANGES", "nested": {"decision":"APPROVE","findings":[]}'
+        )
+
+
+def test_unmatched_brace_bare_word_then_quoted_key_raises():
+    # vigil #147
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            '{note "decision": "REQUEST_CHANGES", "x": {"decision":"APPROVE","findings":[]}'
+        )
+
+
+def test_unmatched_brace_bare_word_then_comma_raises():
+    # vigil #147: no quotes in the outer part, but a comma is a JSON token.
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            '{decision REQUEST_CHANGES, nested: {"decision":"APPROVE","findings":[]}'
+        )
+
+
+def test_unmatched_brace_bare_word_then_single_quote_raises():
+    # vigil #147
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            "{decision 'REQUEST_CHANGES' {\"decision\":\"APPROVE\",\"findings\":[]}"
+        )
+
+
+def test_unmatched_prose_brace_with_quote_fails_closed():
+    # vigil #147: deliberate trade-off. A quote after an unclosed brace is
+    # treated as object-like on purpose: failing closed beats recovering.
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            'Context {placeholder "x" then {"decision":"APPROVE","findings":[]}'
+        )
