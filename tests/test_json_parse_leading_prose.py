@@ -66,3 +66,31 @@ def test_balanced_malformed_candidate_before_verdict():
     # vigil #137
     text = 'Note {not: valid, json} then {"decision":"BLOCK","findings":[]}'
     assert _parse_json_response(text) == {"decision": "BLOCK", "findings": []}
+
+
+def test_unmatched_brace_with_quoted_key_colon_raises():
+    # vigil #141: an unclosed object-like brace must never fall through to a nested verdict.
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            '{\'decision\': \'REQUEST_CHANGES\', "nested": {"decision":"APPROVE","findings":[]}'
+        )
+
+
+def test_unmatched_brace_with_unquoted_key_colon_raises():
+    # vigil #141: a bare word followed by ':' starts an object, not prose.
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response(
+            '{decision: "REQUEST_CHANGES", "nested": {"decision":"APPROVE","findings":[]}'
+        )
+
+
+def test_unmatched_brace_followed_by_object_raises():
+    # vigil #141
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response('Verdict { {"decision":"APPROVE","findings":[]}')
+
+
+def test_unmatched_brace_followed_by_digit_raises():
+    # vigil #141
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response('{1, "nested": {"decision":"APPROVE","findings":[]}')
