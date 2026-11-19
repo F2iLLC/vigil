@@ -259,16 +259,30 @@ def test_caller_workflow_records_why_vigil_is_skipped():
 
 
 def _readme_section(heading: str) -> str:
-    start = README.index(f"\n{heading}\n")
-    level = heading.split(" ", 1)[0]
-    rest = README[start + len(heading) + 2 :]
-    match = re.search(rf"^#{{1,{len(level)}}} ", rest, re.MULTILINE)
-    return rest[: match.start()] if match else rest
+    """Return README text under ``heading`` up to the next same-or-higher heading,
+    ignoring ``#`` lines inside fenced code blocks."""
+    level = len(heading.split(" ", 1)[0])
+    lines = README.splitlines()
+    start = lines.index(heading) + 1
+    in_fence = False
+    for end in range(start, len(lines)):
+        line = lines[end]
+        if line.startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(rf"#{{1,{level}}} ", line):
+            break
+    else:
+        end = len(lines)
+    return "\n".join(lines[start:end])
 
 
 def test_reusable_workflow_anthropic_federation_is_required_not_optional():
     section = _readme_section("### Central reusable workflow")
-    paragraph = section[section.index("**Anthropic") :].split("\n\n", 1)[0]
+    paragraph = next(
+        para
+        for para in section.split("\n\n")
+        if para.startswith("**") and "federation" in para
+    )
 
     assert "(optional)" not in paragraph
     assert "instead of an `ANTHROPIC_API_KEY` secret" not in paragraph
