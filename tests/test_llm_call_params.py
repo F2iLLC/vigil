@@ -97,3 +97,59 @@ def test_response_json_none_content_is_value_error():
 
 def test_response_json_valid():
     assert _response_json(_resp('{"decision": "APPROVE"}'), "x") == {"decision": "APPROVE"}
+
+
+# --- vigil-143: every LiteLLM-droppable param is reported, not a fixed list ---
+
+
+def test_functions_and_function_call_are_reported_by_name(caplog):
+    caplog.set_level(logging.WARNING)
+    _call(["max_tokens"], functions=[{"name": "f"}], function_call="auto")
+    msgs = _drop_warnings(caplog)
+    assert len(msgs) == 1
+    assert "functions" in msgs[0] and "function_call" in msgs[0]
+
+
+def test_metadata_is_never_reported(caplog):
+    caplog.set_level(logging.WARNING)
+    _call([], metadata={"run": "1"}, api_key="x", timeout=30, num_retries=3)
+    assert _drop_warnings(caplog) == []
+
+
+def test_caller_drop_params_false_reports_nothing_for_new_params(caplog):
+    caplog.set_level(logging.WARNING)
+    comp = _call(["max_tokens"], functions=[{"name": "f"}], drop_params=False)
+    assert comp.call_args.kwargs["drop_params"] is False
+    assert _drop_warnings(caplog) == []
+
+
+def test_unknown_model_reports_nothing_for_new_params(caplog):
+    caplog.set_level(logging.WARNING)
+    comp = _call(MagicMock(return_value=None), function_call="auto")
+    assert comp.called
+    assert _drop_warnings(caplog) == []
+
+
+def test_rejectable_helper_failure_reports_nothing(caplog, monkeypatch):
+    import litellm.utils
+
+    caplog.set_level(logging.WARNING)
+    monkeypatch.setattr(
+        litellm.utils, "provider_rejectable_params",
+        MagicMock(side_effect=RuntimeError("boom")), raising=False,
+    )
+    comp = _call(["max_tokens"], temperature=0.2, functions=[{"name": "f"}])
+    assert comp.called
+    assert _drop_warnings(caplog) == []
+
+
+def test_fallback_when_helper_absent(caplog, monkeypatch):
+    import litellm.utils
+
+    caplog.set_level(logging.WARNING)
+    monkeypatch.delattr(litellm.utils, "provider_rejectable_params", raising=False)
+    _call(["max_tokens"], temperature=0.2, function_call="auto", api_key="x")
+    msgs = _drop_warnings(caplog)
+    assert len(msgs) == 1
+    assert "temperature" in msgs[0] and "function_call" in msgs[0]
+    assert "api_key" not in msgs[0]
