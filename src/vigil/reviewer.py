@@ -327,12 +327,47 @@ def _emit_usage_summary(entries: list[dict]) -> dict:
     return totals
 
 
+def _report_dropped_params(model: str, kwargs: dict) -> None:
+    """Warn, by name, about model parameters LiteLLM will drop for ``model`` (#113).
+
+    Best-effort: if support cannot be determined, or the check itself fails,
+    nothing is reported and the review proceeds.
+    """
+    model_params = (
+        "temperature", "top_p", "n", "stop", "max_tokens", "max_completion_tokens",
+        "presence_penalty", "frequency_penalty", "logit_bias", "seed", "response_format",
+        "tools", "tool_choice", "parallel_tool_calls", "logprobs", "top_logprobs",
+        "reasoning_effort", "user",
+    )
+    try:
+        import litellm
+
+        passed = [name for name in model_params if name in kwargs]
+        if not passed:
+            return
+        supported = litellm.get_supported_openai_params(model=model)
+        if supported is None:
+            return  # unknown model: cannot tell what would be dropped
+        dropped = [name for name in passed if name not in supported]
+        if dropped:
+            import logging
+            logging.getLogger(__name__).warning(
+                "LiteLLM is dropping parameters unsupported by model %s: %s",
+                model, ", ".join(dropped),
+            )
+    except Exception:  # noqa: BLE001
+        pass  # telemetry is best-effort and must never fail a review
+
+
 def _call_llm_with_retry(messages: list[dict], model: str, **kwargs):
     """Call litellm completion with exponential backoff on rate limits and transient errors."""
-    # Some models (e.g. claude-sonnet-5-5) accept only a fixed temperature and
-    # LiteLLM raises UnsupportedParamsError for temperature=0.2. Drop any
-    # parameter the selected model rejects rather than failing the whole review.
+    # Policy: let LiteLLM drop any parameter the selected model rejects (rather
+    # than failing the whole review with UnsupportedParamsError), but report
+    # each dropped parameter by name so an unexpected drop is visible. A
+    # caller-supplied drop_params is never overridden.
     kwargs.setdefault("drop_params", True)
+    if kwargs["drop_params"]:
+        _report_dropped_params(model, kwargs)
     for attempt in range(MAX_RETRIES):
         try:
             response = completion(model=model, messages=messages, **kwargs)
