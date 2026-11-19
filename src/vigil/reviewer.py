@@ -32,6 +32,31 @@ MAX_RETRIES = 5
 INITIAL_BACKOFF = 5  # seconds
 
 
+def _matching_brace(text: str, start: int) -> int:
+    """Index of the brace closing the one at ``start`` (string-aware), or -1."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
 def _parse_json_response(text: str) -> dict:
     """Parse JSON from LLM response, handling code fences and trailing text."""
     text = text.strip()
@@ -52,14 +77,21 @@ def _parse_json_response(text: str) -> dict:
 
     # Handle prose before and/or after the JSON object (common with some models,
     # which answer 'Here is the verdict:' and then the object): decode the first
-    # valid JSON object found at any opening brace in the reply.
+    # valid JSON object found at a top-level opening brace in the reply.
+    # A brace that fails to decode is skipped as a whole (to its matching close
+    # brace), never re-entered: otherwise a truncated outer verdict falls
+    # through to one of its nested objects (F2iLLC/vigil#110). No matching
+    # close means the reply was cut off, which is an error, not a fallback.
     decoder = json.JSONDecoder()
     pos = text.find("{")
     while pos != -1:
         try:
             obj, _ = decoder.raw_decode(text, pos)
         except json.JSONDecodeError:
-            pos = text.find("{", pos + 1)
+            end = _matching_brace(text, pos)
+            if end == -1:
+                raise json.JSONDecodeError("Truncated JSON object", text, pos)
+            pos = text.find("{", end + 1)
             continue
         if isinstance(obj, dict):
             return obj
@@ -154,6 +186,14 @@ def _response_json(response, label: str) -> dict:
             f"finish_reason={getattr(choice, 'finish_reason', '?')!r}, "
             f"reply_chars={len(content)}, reply_start={content[:200]!r}"
         ) from e
+
+
+def _required_decision(raw: dict, label: str) -> str:
+    """The reply's ``decision``. A missing one is an error, never an APPROVE (#110)."""
+    decision = raw.get("decision") if isinstance(raw, dict) else None
+    if not isinstance(decision, str):
+        raise ValueError(f"{label}: model reply has no string 'decision' field")
+    return decision
 
 
 # --- Prompt caching (Claude models only) -----------------------------------
@@ -523,7 +563,7 @@ def _run_specialist(
     findings = _parse_findings(raw.get("findings", []))
     observations = _parse_observations(raw.get("observations", []))
     checks = raw.get("checks", {})
-    decision = raw.get("decision", "APPROVE")
+    decision = _required_decision(raw, persona.name)
 
     return PersonaVerdict(
         persona=persona.name,
@@ -609,7 +649,7 @@ Reply with ONLY the single JSON object described in your instructions. No prose 
     )
 
     raw = _response_json(response, "lead reviewer")
-    decision = raw.get("decision", "APPROVE")
+    decision = _required_decision(raw, "lead reviewer")
     summary = raw.get("summary", "")
     findings = _parse_findings(raw.get("findings", []))
     return decision, summary, findings
