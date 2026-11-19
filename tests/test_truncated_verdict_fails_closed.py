@@ -14,7 +14,11 @@ from vigil.personas import Persona, ReviewProfile
 from vigil.reviewer import _run_lead_review, review_diff
 
 TRUNCATED = '{"decision":"REQUEST_CHANGES","findings":[{"file":"a.py","line":1,"severity":"high","message":"bug"}'
-BAD_REPLIES = [TRUNCATED, "{}", '{"findings": []}']
+BAD_REPLIES = [
+    TRUNCATED, "{}", '{"findings": []}',
+    # vigil #136: present but not a string
+    '{"decision": 1, "findings": []}', '{"decision": null, "findings": []}',
+]
 
 
 def _resp(content: str) -> MagicMock:
@@ -74,10 +78,9 @@ def test_bad_lead_reply_raises(mock_llm, reply):
 def test_bad_lead_reply_never_yields_approve_result(mock_llm, _alerts, reply):
     spec = _resp(json.dumps({"decision": "APPROVE", "checks": {}, "findings": [], "observations": []}))
     mock_llm.side_effect = [spec, _resp(reply)]
-    result = None
-    with pytest.raises(Exception):
-        result = review_diff(_diff(), _pr_context(), _profile())
-    assert result is None or result.decision != "APPROVE"
+    # vigil #134: review_diff does not catch the lead's ValueError; it propagates.
+    with pytest.raises(ValueError, match="lead reviewer"):
+        review_diff(_diff(), _pr_context(), _profile())
 
 
 @patch("vigil.reviewer.send_alerts_for_verdicts", return_value=0)

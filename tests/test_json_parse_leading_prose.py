@@ -41,3 +41,28 @@ def test_earlier_complete_object_is_returned_first():
     # Pinned: the first complete top-level object wins. The caller rejects a
     # decision-less reply (see test_truncated_verdict_fails_closed.py).
     assert _parse_json_response('Use {} here {"decision":"REQUEST_CHANGES","findings":[]}') == {}
+
+
+def test_unmatched_prose_brace_before_verdict():
+    # vigil #135: an unclosed brace in prose is not a truncated JSON object.
+    text = 'Context {placeholder then verdict: {"decision":"APPROVE","findings":[]}'
+    assert _parse_json_response(text) == {"decision": "APPROVE", "findings": []}
+
+
+def test_unmatched_prose_brace_before_request_changes_returns_outer():
+    text = 'See {x and then {"decision":"REQUEST_CHANGES","findings":[{"file":"a.py","line":1}]}'
+    assert _parse_json_response(text) == {
+        "decision": "REQUEST_CHANGES", "findings": [{"file": "a.py", "line": 1}],
+    }
+
+
+def test_unmatched_prose_brace_then_truncated_verdict_raises():
+    # Anti-case: skipping the prose brace must not reach the nested finding.
+    with pytest.raises(json.JSONDecodeError):
+        _parse_json_response('Context {placeholder then {"decision":"REQUEST_CHANGES","findings":[{"file":"a.py"}')
+
+
+def test_balanced_malformed_candidate_before_verdict():
+    # vigil #137
+    text = 'Note {not: valid, json} then {"decision":"BLOCK","findings":[]}'
+    assert _parse_json_response(text) == {"decision": "BLOCK", "findings": []}
