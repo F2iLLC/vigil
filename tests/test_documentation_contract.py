@@ -256,3 +256,48 @@ def test_caller_workflow_records_why_vigil_is_skipped():
             f"vigil.yml must keep {phrase!r} in the recorded reason it stays "
             f"off ({fact})"
         )
+
+
+def _readme_section(heading: str) -> str:
+    start = README.index(f"\n{heading}\n")
+    level = heading.split(" ", 1)[0]
+    rest = README[start + len(heading) + 2 :]
+    match = re.search(rf"^#{{1,{len(level)}}} ", rest, re.MULTILINE)
+    return rest[: match.start()] if match else rest
+
+
+def test_reusable_workflow_anthropic_federation_is_required_not_optional():
+    section = _readme_section("### Central reusable workflow")
+    paragraph = section[section.index("**Anthropic") :].split("\n\n", 1)[0]
+
+    assert "(optional)" not in paragraph
+    assert "instead of an `ANTHROPIC_API_KEY` secret" not in paragraph
+    assert "static key" not in paragraph or "not accepted" in paragraph
+    assert not re.search(r"static key[^.]*need no change", paragraph)
+    assert "requires workload identity federation" in paragraph
+    assert "`ANTHROPIC_API_KEY` is not accepted" in paragraph
+    assert re.search(
+        r"only when `model` or `lead-model` is a `claude-\*` or `anthropic/\*` model",
+        paragraph,
+    )
+    for var in (
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_SERVICE_ACCOUNT_ID",
+        "ANTHROPIC_WORKSPACE_ID",
+    ):
+        assert var in paragraph
+
+
+def test_reusable_workflow_secrets_table_does_not_require_anthropic_api_key():
+    section = _readme_section("### Central reusable workflow")
+    rows = [line for line in section.splitlines() if line.startswith("| `")]
+    assert not any(row.startswith("| `ANTHROPIC_API_KEY`") for row in rows)
+    claude_rows = [row for row in rows if "`claude-*`" in row]
+    assert claude_rows and all("ANTHROPIC_FEDERATION_RULE_ID" in r for r in claude_rows)
+
+
+def test_composite_action_still_documents_static_anthropic_key():
+    section = _readme_section("### Direct composite-action use")
+    assert "| `anthropic-api-key` |" in section
+    assert "anthropic-api-key" in ACTION_YAML["inputs"]
