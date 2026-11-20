@@ -235,6 +235,14 @@ thread body; threads opened by people are never touched. The other lifecycle
 paths still apply: a resolution reply (`vigil dismiss-resolved`), or the cited
 code changing (`vigil resolve-addressed`).
 
+`vigil resolve-addressed` fails closed: if GitHub refuses to resolve a thread,
+the command prints the GraphQL error and the unresolved thread IDs and exits
+non-zero instead of reporting `Auto-resolved 0`. On this repository, with the
+job capped at `contents: read`, `pull-requests: write`, `issues: write` (#116),
+GitHub answered `resolveReviewThread` with `FORBIDDEN: Resource not accessible
+by integration` (run 44528494711). Whether to widen that cap is an owner
+decision (Refs F2iLLC/vigil#158).
+
 ### Documentation PRs
 
 Documentation PRs are reviewed like any other diff. There is no fast path and no auto-approval.

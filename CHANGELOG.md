@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`resolve-addressed` fails closed when GitHub refuses to resolve a thread** — A `resolveReviewThread` response with GraphQL `errors` and `"data": null` (e.g. `FORBIDDEN: Resource not accessible by integration`) used to raise a swallowed `AttributeError`, print `Auto-resolved 0` and exit 0. `resolve_threads_batch` and `fetch_review_threads` now raise `ThreadResolutionError` (carrying `resolved`, `failed` and the GraphQL `errors`; HTTP failures count too), `resolve-addressed` and `dismiss-resolved` print the error and exit 1, and the review command's auto-resolve paths print a visible warning without changing the verdict. Refs F2iLLC/vigil#158.
+
 ### Added
 
 - **Every LiteLLM-droppable parameter is reported by name** — When Vigil lets LiteLLM drop unsupported parameters (`drop_params=True`), the dropped-parameter warning now derives its candidate set from `litellm.utils.provider_rejectable_params()` on the actual call kwargs (minus the keys LiteLLM never validates as model params: `drop_params`, `allowed_openai_params`, `additional_drop_params`, `messages`, `model`, `custom_llm_provider`, `api_version`, `metadata`), instead of a hard-coded 18-name tuple that silently missed `functions`, `function_call`, and anything LiteLLM adds later. Older LiteLLM without that helper falls back to the tuple plus `functions`/`function_call`; the check stays best-effort and never fails a review. Fixes F2iLLC/vigil#143.
