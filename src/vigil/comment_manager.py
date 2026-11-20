@@ -446,6 +446,10 @@ def fetch_review_threads(
     """Fetch review threads via GraphQL with path, line, body, and resolution status.
 
     Returns list of dicts: {id, isResolved, path, line, body, comments}
+
+    Fails closed: raises ThreadResolutionError if any page carries GraphQL
+    ``errors`` (even alongside partial data) or lacks ``pullRequest`` /
+    ``reviewThreads``, so a partial thread list is never returned.
     """
     query = """
     query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
@@ -480,12 +484,13 @@ def fetch_review_threads(
         data = _graphql(query, variables, token)
         errors = data.get("errors") or []
         pr_data = ((data.get("data") or {}).get("repository") or {}).get("pullRequest")
-        if pr_data is None and errors:
+        if errors:
             raise ThreadResolutionError(
                 errors=errors, message="Could not fetch review threads",
             )
-        pr_data = pr_data or {}
-        thread_data = pr_data.get("reviewThreads") or {}
+        thread_data = pr_data.get("reviewThreads") if isinstance(pr_data, dict) else None
+        if not isinstance(thread_data, dict):
+            raise ThreadResolutionError(message="Could not fetch review threads")
         for node in thread_data.get("nodes", []):
             comments = node.get("comments", {}).get("nodes") or []
             first_comment = (comments or [{}])[0]
