@@ -214,3 +214,81 @@ def test_review_outcome_unchanged_when_auto_resolve_raises(monkeypatch, capsys):
     assert rec.posted == ["REQUEST_CHANGES"]
     assert "FORBIDDEN" in out
     assert "PRRT_a" in out
+
+
+# ---------- fetch_review_threads: partial data with errors fails closed ----------
+
+def _node(tid, line=3):
+    return {
+        "id": tid, "isResolved": False,
+        "comments": {"nodes": [{"id": 1, "body": "x VGL-abc12345", "path": "a.py",
+                                "line": line, "author": {"login": "vigil"}}]},
+    }
+
+
+def _page(nodes, has_next=False, cursor=None, errors=None):
+    body = {"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+        "nodes": nodes,
+    }}}}}
+    if errors is not None:
+        body["errors"] = errors
+    return body
+
+
+FORBIDDEN_PARTIAL = {"type": "FORBIDDEN", "message": "Resource not accessible by integration"}
+
+
+def test_fetch_partial_data_with_errors_raises(monkeypatch):
+    serve(monkeypatch, _page([_node("PRRT_a")], errors=[FORBIDDEN_PARTIAL]))
+    with pytest.raises(ThreadResolutionError) as exc:
+        fetch_review_threads("F2iLLC", "demo", 1, "tok")
+    assert "FORBIDDEN" in str(exc.value)
+    assert "Could not fetch review threads" in str(exc.value)
+
+
+def test_fetch_second_page_partial_with_errors_raises(monkeypatch):
+    serve(
+        monkeypatch,
+        _page([_node("PRRT_a")], has_next=True, cursor="c1"),
+        _page([_node("PRRT_b")], errors=[FORBIDDEN_PARTIAL]),
+    )
+    with pytest.raises(ThreadResolutionError):
+        fetch_review_threads("F2iLLC", "demo", 1, "tok")
+
+
+def test_fetch_null_pull_request_without_errors_raises(monkeypatch):
+    serve(monkeypatch, {"data": {"repository": {"pullRequest": None}}})
+    with pytest.raises(ThreadResolutionError) as exc:
+        fetch_review_threads("F2iLLC", "demo", 1, "tok")
+    assert "Could not fetch review threads" in str(exc.value)
+
+
+def test_fetch_null_review_threads_without_errors_raises(monkeypatch):
+    serve(monkeypatch, {"data": {"repository": {"pullRequest": {"reviewThreads": None}}}})
+    with pytest.raises(ThreadResolutionError):
+        fetch_review_threads("F2iLLC", "demo", 1, "tok")
+
+
+def test_fetch_clean_two_pages_returns_all_threads(monkeypatch):
+    calls = serve(
+        monkeypatch,
+        _page([_node("PRRT_a"), _node("PRRT_b")], has_next=True, cursor="c1"),
+        _page([_node("PRRT_c")]),
+    )
+    threads = fetch_review_threads("F2iLLC", "demo", 1, "tok")
+    assert [t["id"] for t in threads] == ["PRRT_a", "PRRT_b", "PRRT_c"]
+    assert len(calls) == 2
+    assert calls[1]["variables"]["cursor"] == "c1"
+
+
+def test_cli_partial_thread_fetch_with_errors_exits_one(monkeypatch):
+    wire_cli(monkeypatch, resolve_addressed_threads)
+    serve(
+        monkeypatch,
+        _page([_node("PRRT_a")], errors=[FORBIDDEN_PARTIAL]),
+        {"data": {"t0": {"thread": {"id": "PRRT_a", "isResolved": True}}}},
+    )
+    result = invoke()
+    assert result.exit_code == 1
+    assert "Auto-resolved" not in result.output
