@@ -691,7 +691,8 @@ def dismiss_resolved(
     try:
         count = resolve_dismissed_threads(owner, repo, pr_number, token)
     except ThreadResolutionError as e:
-        _fail_thread_resolution(e, "dismissed")
+        _warn_thread_resolution(e, "dismissed")
+        count = len(e.resolved)
     console.print(f"[dim]Resolved {count} dismissed thread(s)[/dim]")
 
 
