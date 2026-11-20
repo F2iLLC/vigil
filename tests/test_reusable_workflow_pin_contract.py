@@ -144,3 +144,64 @@ def test_pinned_action_includes_the_diff_size_guard() -> None:
         f"pinned action {sha} predates the diff-size guard (src/vigil/diff_guard.py); "
         "advance the pin"
     )
+
+
+# --- F2iLLC/vigil#88: the pin is one full SHA at the expected commit --------
+
+import re
+
+EXPECTED_PIN = "c8163697789cc1bec2073936d247aafd72f834a5"
+EXPECTED_PIN_COUNT = 3
+_USES_PIN_RE = re.compile(r"^\s*-?\s*uses:\s*F2iLLC/vigil@(\S+)", re.MULTILINE)
+_FULL_SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def collect_vigil_pins(text: str) -> list[str]:
+    """Return every ref in a ``uses: F2iLLC/vigil@<ref>`` line of ``text``."""
+    return _USES_PIN_RE.findall(text)
+
+
+def validate_vigil_pins(text: str, expected: str, count: int) -> str:
+    """Raise ``ValueError`` unless ``text`` has exactly ``count`` identical
+    full 40-lowercase-hex pins equal to ``expected``; return the pin."""
+    pins = collect_vigil_pins(text)
+    if len(pins) != count:
+        raise ValueError(f"expected {count} F2iLLC/vigil pins, found {len(pins)}: {pins!r}")
+    if len(set(pins)) != 1:
+        raise ValueError(f"pins disagree: {sorted(set(pins))!r}")
+    pin = pins[0]
+    if not _FULL_SHA_RE.fullmatch(pin):
+        raise ValueError(f"pin {pin!r} is not a full 40-lowercase-hex SHA")
+    if pin != expected:
+        raise ValueError(f"pin {pin!r} != expected {expected!r}")
+    return pin
+
+
+def test_reusable_workflow_pins_expected_full_sha() -> None:
+    text = REUSABLE_WORKFLOW.read_text(encoding="utf-8")
+    assert validate_vigil_pins(text, EXPECTED_PIN, EXPECTED_PIN_COUNT) == EXPECTED_PIN
+
+
+def _synthetic(*refs: str) -> str:
+    return "\n".join(f"      - uses: F2iLLC/vigil@{r}" for r in refs) + "\n"
+
+
+def test_pin_validator_accepts_synthetic_good_case() -> None:
+    assert validate_vigil_pins(_synthetic(*[EXPECTED_PIN] * 3), EXPECTED_PIN, 3) == EXPECTED_PIN
+
+
+@pytest.mark.parametrize(
+    "refs",
+    [
+        pytest.param(["c816369"] * 3, id="short-sha"),
+        pytest.param([EXPECTED_PIN, EXPECTED_PIN, "06b99289d029b6f0a6c52a2501652a3c5d35b24b"], id="mixed"),
+        pytest.param(["06b99289d029b6f0a6c52a2501652a3c5d35b24b"] * 3, id="old-pin"),
+        pytest.param(["v1"] * 3, id="non-hex-tag"),
+        pytest.param(["z" * 40] * 3, id="non-hex-40"),
+        pytest.param([EXPECTED_PIN.upper()] * 3, id="uppercase"),
+        pytest.param([EXPECTED_PIN] * 2, id="wrong-count"),
+    ],
+)
+def test_pin_validator_rejects_bad_pins(refs: list[str]) -> None:
+    with pytest.raises(ValueError):
+        validate_vigil_pins(_synthetic(*refs), EXPECTED_PIN, 3)
