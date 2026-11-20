@@ -157,10 +157,24 @@ jobs:
               claude-*|anthropic/*)
                 if [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] && [ -n "$ANTHROPIC_ORGANIZATION_ID" ] && [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] && [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
                   use_wif=true
-                elif [ -n "$ANTHROPIC_FEDERATION_RULE_ID" ] || [ -n "$ANTHROPIC_ORGANIZATION_ID" ] || [ -n "$ANTHROPIC_SERVICE_ACCOUNT_ID" ] || [ -n "$ANTHROPIC_WORKSPACE_ID" ]; then
-                  missing+=("all four Anthropic federation variables (partial configuration is invalid; static API keys are disabled)")
                 else
-                  missing+=("all four Anthropic federation variables (static API keys are disabled)")
+                  # Name only the unset variables (never their values) so a
+                  # partially configured caller knows exactly what to add.
+                  local unset_vars=() var_name
+                  for var_name in ANTHROPIC_FEDERATION_RULE_ID ANTHROPIC_ORGANIZATION_ID ANTHROPIC_SERVICE_ACCOUNT_ID ANTHROPIC_WORKSPACE_ID; do
+                    [ -n "${!var_name}" ] || unset_vars+=("$var_name")
+                  done
+                  local note="static API keys are disabled"
+                  [ "${#unset_vars[@]}" -eq 4 ] || note="partial configuration is invalid; $note"
+                  local joined
+                  printf -v joined '%s, ' "${unset_vars[@]}"
+                  local entry="${joined%, } (Anthropic federation; $note)"
+                  # model and lead-model may both be Claude: report once.
+                  local existing
+                  for existing in "${missing[@]}"; do
+                    [ "$existing" != "$entry" ] || return 0
+                  done
+                  missing+=("$entry")
                 fi
                 ;;
               gpt-*|o[0-9]-*|openai/*)
