@@ -22,6 +22,7 @@ from .comment_manager import (
     resolve_addressed_threads,
     resolve_dismissed_threads,
     resolve_vigil_threads_on_approval,
+    ThreadResolutionError,
 )
 from .decision_log import clear_decisions, get_decisions, remove_decision
 from .diff_parser import commentable_lines, parse_diff
@@ -392,6 +393,9 @@ def review(
             dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
             if dismissed:
                 console.print(f"[dim]Resolved {dismissed} dismissed thread(s)[/dim]")
+        except ThreadResolutionError as e:
+            dismissed = len(e.resolved)
+            _warn_thread_resolution(e, "dismissed")
         except Exception as e:
             console.print(f"[dim yellow]Could not resolve dismissed threads: {e}[/dim yellow]")
 
@@ -442,9 +446,13 @@ def review(
                 incremental_lines = commentable_lines(pr_data["diff"])
                 changed_set = set(changed_files)
                 changed_line_map = {f: lines for f, lines in incremental_lines.items() if f in changed_set}
-                resolved = resolve_addressed_threads(
-                    owner, repo, pr_number, token, changed_line_map,
-                )
+                try:
+                    resolved = resolve_addressed_threads(
+                        owner, repo, pr_number, token, changed_line_map,
+                    )
+                except ThreadResolutionError as e:
+                    resolved = len(e.resolved)
+                    _warn_thread_resolution(e, "addressed")
                 if resolved:
                     console.print(f"[dim]Auto-resolved {resolved} outdated thread(s)[/dim]")
 
@@ -639,6 +647,8 @@ def review(
                             f"[dim]Resolved {thread_count} open Vigil thread(s) "
                             f"cleared by the approval at {head_sha[:7]}[/dim]"
                         )
+                except ThreadResolutionError as e:
+                    _warn_thread_resolution(e, "open Vigil")
                 # Belt and braces again: this cleanup must never be able to
                 # fail a review that has already posted.
                 except Exception as e:
@@ -678,7 +688,11 @@ def dismiss_resolved(
         raise typer.Exit(1)
 
     owner, repo, pr_number = parse_pr_url(pr_url)
-    count = resolve_dismissed_threads(owner, repo, pr_number, token)
+    try:
+        count = resolve_dismissed_threads(owner, repo, pr_number, token)
+    except ThreadResolutionError as e:
+        _warn_thread_resolution(e, "dismissed")
+        count = len(e.resolved)
     console.print(f"[dim]Resolved {count} dismissed thread(s)[/dim]")
 
 
@@ -715,7 +729,10 @@ def resolve_addressed(
 
     console.print(f"[dim]Last Vigil review at {last_sha[:7]}, head is {pr_data['head_sha'][:7]}[/dim]")
 
-    dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
+    try:
+        dismissed = resolve_dismissed_threads(owner, repo, pr_number, token)
+    except ThreadResolutionError as e:
+        _fail_thread_resolution(e, "dismissed")
     if dismissed:
         console.print(f"[dim]Resolved {dismissed} dismissed thread(s)[/dim]")
 
@@ -754,8 +771,34 @@ def resolve_addressed(
     changed_set = set(changed_files)
     changed_line_map = {f: lines for f, lines in incremental_lines.items() if f in changed_set}
 
-    count = resolve_addressed_threads(owner, repo, pr_number, token, changed_line_map)
+    try:
+        count = resolve_addressed_threads(owner, repo, pr_number, token, changed_line_map)
+    except ThreadResolutionError as e:
+        _fail_thread_resolution(e, "addressed")
     console.print(f"[dim]Auto-resolved {count} addressed thread(s)[/dim]")
+
+
+def _thread_error_detail(e: "ThreadResolutionError") -> str:
+    errs = "; ".join(
+        f"{(x.get('type') or 'ERROR')}: {x.get('message', '')}" if isinstance(x, dict) else str(x)
+        for x in e.errors
+    ) or "no GraphQL error detail"
+    failed = ", ".join(e.failed) or "none"
+    return f"GitHub refused to resolve review thread(s) — {errs} (unresolved: {failed})"
+
+
+def _warn_thread_resolution(e: "ThreadResolutionError", kind: str) -> None:
+    """Visible warning for review-path callers; the review continues (#158)."""
+    if e.resolved:
+        console.print(f"[dim]Resolved {len(e.resolved)} {kind} thread(s)[/dim]")
+    console.print(f"[yellow]Warning:[/yellow] {_thread_error_detail(e)}", markup=True)
+
+
+def _fail_thread_resolution(e: "ThreadResolutionError", kind: str) -> None:
+    """Fail closed for resolve-addressed: report, then exit non-zero (#158)."""
+    console.print(f"[dim]Resolved {len(e.resolved)} {kind} thread(s) before the failure[/dim]")
+    console.print(f"[red]Error:[/red] {_thread_error_detail(e)}")
+    raise typer.Exit(1)
 
 @app.command()
 def serve(
