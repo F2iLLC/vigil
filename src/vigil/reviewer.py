@@ -57,6 +57,11 @@ def _matching_brace(text: str, start: int) -> int:
     return -1
 
 
+_VERDICT_WORD = re.compile(
+    r"\b(?:decision|findings|approve|request_changes|block)\b", re.IGNORECASE
+)
+
+
 def _parse_json_response(text: str) -> dict:
     """Parse JSON from LLM response, handling code fences and trailing text."""
     text = text.strip()
@@ -80,8 +85,20 @@ def _parse_json_response(text: str) -> dict:
     # valid JSON object found at a top-level opening brace in the reply.
     # A brace that fails to decode is skipped as a whole (to its matching close
     # brace), never re-entered: otherwise a truncated outer verdict falls
-    # through to one of its nested objects (F2iLLC/vigil#110). No matching
-    # close means the reply was cut off, which is an error, not a fallback.
+    # through to one of its nested objects (F2iLLC/vigil#110). A brace with no
+    # matching close is a cut-off reply, an error rather than a fallback. It is
+    # prose only when the next non-whitespace text is a bare word starting with
+    # a letter that is not followed by ':' -- e.g. 'Context {placeholder'; then
+    # the search moves on to the next brace after it (F2iLLC/vigil#135).
+    # Anything else (end of text, '"', "'", '}', '{', '[', a digit, other
+    # punctuation, or an unquoted 'key:') is object-like and raises, so a
+    # malformed unclosed verdict never falls through to a nested object and
+    # becomes APPROVE (F2iLLC/vigil#141). The bare word alone is not enough:
+    # the text after the brace, up to the next '{' (or the end), must also hold
+    # none of the JSON tokens '"', "'", ',', '[' or ']'; otherwise it is
+    # object-like and raises (F2iLLC/vigil#147). That span must also hold no
+    # verdict word ('decision', 'findings', 'approve', 'request_changes',
+    # 'block' as a whole word, any case); otherwise it raises (F2iLLC/vigil#152).
     decoder = json.JSONDecoder()
     pos = text.find("{")
     while pos != -1:
@@ -90,7 +107,19 @@ def _parse_json_response(text: str) -> dict:
         except json.JSONDecodeError:
             end = _matching_brace(text, pos)
             if end == -1:
-                raise json.JSONDecodeError("Truncated JSON object", text, pos)
+                rest = text[pos + 1:].lstrip()
+                word = re.match(r"[A-Za-z][A-Za-z0-9_-]*", rest)
+                nxt = text.find("{", pos + 1)
+                span = text[pos + 1:] if nxt == -1 else text[pos + 1:nxt]
+                if (
+                    not word
+                    or re.match(r"\s*:", rest[word.end():])
+                    or re.search(r"[\"',\[\]]", span)
+                    or _VERDICT_WORD.search(span)
+                ):
+                    raise json.JSONDecodeError("Truncated JSON object", text, pos)
+                pos = text.find("{", pos + 1)
+                continue
             pos = text.find("{", end + 1)
             continue
         if isinstance(obj, dict):
