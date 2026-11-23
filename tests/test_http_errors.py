@@ -228,26 +228,32 @@ class TestGraphql:
 class TestResolveThreadsBatchErrors:
 
     @patch("vigil.comment_manager._graphql")
-    def test_graphql_failure_returns_empty(self, mock_gql):
-        """If the batch mutation fails, return empty (don't crash)."""
+    def test_graphql_failure_raises_thread_resolution_error(self, mock_gql):
+        """If the batch mutation fails, fail closed with the IDs (Refs #158)."""
+        from vigil.comment_manager import ThreadResolutionError
         mock_gql.side_effect = httpx.HTTPStatusError(
             "500", request=MagicMock(), response=MagicMock()
         )
-        result = resolve_threads_batch(["thread_1", "thread_2"], "token")
-        assert result == []
+        with pytest.raises(ThreadResolutionError) as exc:
+            resolve_threads_batch(["thread_1", "thread_2"], "token")
+        assert exc.value.resolved == []
+        assert exc.value.failed == ["thread_1", "thread_2"]
 
     @patch("vigil.comment_manager._graphql")
     def test_partial_success(self, mock_gql):
-        """Some threads resolve, some don't — return only the resolved ones."""
+        """Some threads resolve, some don't — the resolved ones are reported
+        on the error, the rest are named as failed (Refs #158)."""
+        from vigil.comment_manager import ThreadResolutionError
         mock_gql.return_value = {
             "data": {
                 "t0": {"thread": {"id": "a", "isResolved": True}},
                 "t1": {"thread": {"id": "b", "isResolved": False}},
             }
         }
-        result = resolve_threads_batch(["thread_a", "thread_b"], "token")
-        assert len(result) == 1
-        assert result[0] == "thread_a"
+        with pytest.raises(ThreadResolutionError) as exc:
+            resolve_threads_batch(["thread_a", "thread_b"], "token")
+        assert exc.value.resolved == ["thread_a"]
+        assert exc.value.failed == ["thread_b"]
 
 
 # ---------- get_diff_between_commits ----------

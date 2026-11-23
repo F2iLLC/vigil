@@ -392,6 +392,39 @@ def dismiss_stale_vigil_blocks(
     return dismissed
 
 
+class ThreadResolutionError(Exception):
+    """GitHub refused (or failed) to return/resolve review threads.
+
+    Carries the thread IDs that were resolved before the failure (so callers
+    can still count them), the IDs that were not, and the GraphQL errors.
+    Refs F2iLLC/vigil#158.
+    """
+
+    def __init__(
+        self,
+        resolved: list[str] | None = None,
+        failed: list[str] | None = None,
+        errors: list | None = None,
+        message: str = "",
+    ):
+        self.resolved = list(resolved or [])
+        self.failed = list(failed or [])
+        self.errors = list(errors or [])
+        parts = [message or "GitHub did not resolve review thread(s)"]
+        if self.errors:
+            parts.append("GraphQL errors: " + "; ".join(_format_graphql_error(e) for e in self.errors))
+        if self.failed:
+            parts.append("unresolved threads: " + ", ".join(self.failed))
+        super().__init__(" — ".join(parts))
+
+
+def _format_graphql_error(err) -> str:
+    if isinstance(err, dict):
+        etype = err.get("type") or "ERROR"
+        return f"{etype}: {err.get('message', '')}".strip()
+    return str(err)
+
+
 def _graphql(query: str, variables: dict, token: str) -> dict:
     """Execute a GitHub GraphQL query."""
     resp = httpx.post(
@@ -413,6 +446,10 @@ def fetch_review_threads(
     """Fetch review threads via GraphQL with path, line, body, and resolution status.
 
     Returns list of dicts: {id, isResolved, path, line, body, comments}
+
+    Fails closed: raises ThreadResolutionError if any page carries GraphQL
+    ``errors`` (even alongside partial data) or lacks ``pullRequest`` /
+    ``reviewThreads``, so a partial thread list is never returned.
     """
     query = """
     query($owner: String!, $repo: String!, $pr: Int!, $cursor: String) {
@@ -445,8 +482,15 @@ def fetch_review_threads(
     while True:
         variables = {"owner": owner, "repo": repo, "pr": pr_number, "cursor": cursor}
         data = _graphql(query, variables, token)
-        pr_data = data.get("data", {}).get("repository", {}).get("pullRequest", {})
-        thread_data = pr_data.get("reviewThreads", {})
+        errors = data.get("errors") or []
+        pr_data = ((data.get("data") or {}).get("repository") or {}).get("pullRequest")
+        if errors:
+            raise ThreadResolutionError(
+                errors=errors, message="Could not fetch review threads",
+            )
+        thread_data = pr_data.get("reviewThreads") if isinstance(pr_data, dict) else None
+        if not isinstance(thread_data, dict):
+            raise ThreadResolutionError(message="Could not fetch review threads")
         for node in thread_data.get("nodes", []):
             comments = node.get("comments", {}).get("nodes") or []
             first_comment = (comments or [{}])[0]
@@ -476,12 +520,16 @@ def resolve_threads_batch(thread_ids: list[str], token: str) -> list[str]:
     """Resolve multiple review threads in batched GraphQL mutations.
 
     Sends up to _BATCH_SIZE mutations per request to avoid N+1 round-trips.
-    Returns list of successfully resolved thread IDs.
+    Returns list of successfully resolved thread IDs. Raises
+    ThreadResolutionError (after processing every batch) if any thread was not
+    resolved; its ``resolved`` attribute still lists the ones that were.
     """
     if not thread_ids:
         return []
 
     resolved: list[str] = []
+    failed: list[str] = []
+    errors: list = []
     for batch_start in range(0, len(thread_ids), _BATCH_SIZE):
         batch = thread_ids[batch_start : batch_start + _BATCH_SIZE]
 
@@ -503,15 +551,22 @@ def resolve_threads_batch(thread_ids: list[str], token: str) -> list[str]:
 
         try:
             data = _graphql(mutation, variables, token)
-            result_data = data.get("data", {})
-            for i, tid in enumerate(batch):
-                alias = f"t{i}"
-                thread_result = result_data.get(alias, {}).get("thread", {})
-                if thread_result.get("isResolved"):
-                    resolved.append(tid)
-        except Exception as e:
+        except Exception as e:  # HTTP / network failure is a failure, not a no-op
             log.warning("Batch resolve failed for %d threads: %s", len(batch), e)
+            failed.extend(batch)
+            errors.append({"type": type(e).__name__, "message": str(e)})
+            continue
+        errors.extend(data.get("errors") or [])
+        result_data = data.get("data") or {}
+        for i, tid in enumerate(batch):
+            thread_result = ((result_data.get(f"t{i}") or {}).get("thread")) or {}
+            if thread_result.get("isResolved"):
+                resolved.append(tid)
+            else:
+                failed.append(tid)
 
+    if failed:
+        raise ThreadResolutionError(resolved=resolved, failed=failed, errors=errors)
     return resolved
 
 
