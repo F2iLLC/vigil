@@ -410,7 +410,8 @@ class ThreadResolutionError(Exception):
         self.resolved = list(resolved or [])
         self.failed = list(failed or [])
         self.errors = list(errors or [])
-        parts = [message or "GitHub did not resolve review thread(s)"]
+        self.message = message or "GitHub did not resolve review thread(s)"
+        parts = [self.message]
         if self.errors:
             parts.append("GraphQL errors: " + "; ".join(_format_graphql_error(e) for e in self.errors))
         if self.failed:
