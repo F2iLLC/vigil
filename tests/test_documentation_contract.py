@@ -216,7 +216,7 @@ def test_readme_documents_the_fork_constraint_for_external_context():
 # --- F2iLLC/vigil#90 (why Vigil PR Review stays off) ----------------------
 
 
-def _caller_prose() -> str:
+def _caller_prose(caller: str | None = None) -> str:
     """vigil.yml's comment prose, unwrapped.
 
     The record this file guards lives in YAML comments, so its sentences are
@@ -226,16 +226,18 @@ def _caller_prose() -> str:
     re-flowing the comment is free, deleting it is not.
     Inline references such as ``#90`` survive, only the leading marker goes.
     """
-    unmarked = (re.sub(r"^\s*#\s?", "", line) for line in CALLER.splitlines())
+    text = CALLER if caller is None else caller
+    unmarked = (re.sub(r"^\s*#\s?", "", line) for line in text.splitlines())
     return re.sub(r"\s+", " ", " ".join(unmarked))
 
 
-def test_caller_workflow_records_why_vigil_is_skipped():
+def test_caller_workflow_keeps_the_2026_09_27_skip_history():
     # The switch this record governs.
     assert "VIGIL_SKIP" in CALLER
 
-    # #69 asked for the switch to be re-enabled *or* the reason it stays off
-    # recorded, and was closed with neither done. The record is the deliverable,
+    # #69 asked for the switch to be re-enabled *or* the reason it was off
+    # recorded, and was closed with neither done. The 2026-09-27 record is now
+    # superseded history (see the current-state test below) but is kept. The record is the deliverable,
     # so pin its substance rather than its citation: the assertion above is not
     # load-bearing (the pre-existing kill-switch prose already supplies
     # "VIGIL_SKIP"), and a citation alone would let a bare "# See #90" pass
@@ -253,9 +255,35 @@ def test_caller_workflow_records_why_vigil_is_skipped():
         ("owner decision", "who may reverse it"),
     ):
         assert phrase in prose, (
-            f"vigil.yml must keep {phrase!r} in the recorded reason it stays "
-            f"off ({fact})"
+            f"vigil.yml must keep {phrase!r} in the dated 2026-09-27 "
+            f"history ({fact})"
         )
+
+
+CURRENT_STATE_MARKER = "Current state (observed 2026-11-20)"
+
+
+def _assert_caller_records_current_state(caller: str) -> None:
+    """The record must carry the observed current state after a marker, with
+    ``disabled_manually`` confined to the history before it."""
+    prose = _caller_prose(caller)
+    assert CURRENT_STATE_MARKER in prose, (
+        f"vigil.yml must carry a dated {CURRENT_STATE_MARKER!r} paragraph"
+    )
+    history, current = prose.split(CURRENT_STATE_MARKER, 1)
+    assert "superseded" in history, "the 2026-09-27 record must be marked superseded"
+    assert "disabled_manually" in history
+    assert "disabled_manually" not in current, (
+        "disabled_manually is history, never the current state"
+    )
+    assert "`active`" in current, "current state must say the workflow is active"
+    assert "not recorded in-tree" in current, (
+        "current state must say the re-enable reason is not recorded"
+    )
+
+
+def test_caller_workflow_records_current_state():
+    _assert_caller_records_current_state(CALLER)
 
 
 def _readme_section(heading: str, readme: str | None = None) -> str:
