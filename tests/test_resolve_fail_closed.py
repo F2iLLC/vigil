@@ -145,6 +145,17 @@ def invoke():
     return CliRunner().invoke(cli.app, ["resolve-addressed", PR_URL])
 
 
+def test_cli_fetch_failure_preserves_operation_message(monkeypatch):
+    wire_cli(monkeypatch, resolve_addressed_threads)
+    serve(monkeypatch, {"data": None, "errors": [FORBIDDEN]})
+    result = invoke()
+    assert result.exit_code == 1
+    assert "Could not fetch review threads" in result.output
+    assert "FORBIDDEN" in result.output
+    assert "refused to resolve" not in result.output
+    assert "unresolved:" not in result.output
+
+
 def test_cli_forbidden_exits_nonzero_and_names_error(monkeypatch):
     def boom(*a):
         raise ThreadResolutionError(resolved=[], failed=["PRRT_a"], errors=[FORBIDDEN])

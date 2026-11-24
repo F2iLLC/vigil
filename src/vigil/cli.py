@@ -783,8 +783,10 @@ def _thread_error_detail(e: "ThreadResolutionError") -> str:
         f"{(x.get('type') or 'ERROR')}: {x.get('message', '')}" if isinstance(x, dict) else str(x)
         for x in e.errors
     ) or "no GraphQL error detail"
-    failed = ", ".join(e.failed) or "none"
-    return f"GitHub refused to resolve review thread(s) — {errs} (unresolved: {failed})"
+    detail = f"{e.message} — {errs}"
+    if e.failed:
+        detail += f" (unresolved: {', '.join(e.failed)})"
+    return detail
 
 
 def _warn_thread_resolution(e: "ThreadResolutionError", kind: str) -> None:

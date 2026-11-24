@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Thread-resolution errors preserve the operation message** — Fetch failures report `Could not fetch review threads` with the GraphQL error instead of claiming resolution was refused; unresolved IDs are shown only when present. Fixes F2iLLC/vigil#161.
 - **`resolve-addressed` fails closed when GitHub refuses to resolve a thread** — A `resolveReviewThread` response with GraphQL `errors` and `"data": null` (e.g. `FORBIDDEN: Resource not accessible by integration`) used to raise a swallowed `AttributeError`, print `Auto-resolved 0` and exit 0. `resolve_threads_batch` and `fetch_review_threads` now raise `ThreadResolutionError` (carrying `resolved`, `failed` and the GraphQL `errors`; HTTP failures count too), `resolve-addressed` prints the error and exits 1, while `dismiss-resolved` and the review command's auto-resolve paths print a visible warning (the GraphQL error and the unresolved thread IDs) and keep their previous exit behavior, without changing the verdict. `fetch_review_threads` also fails closed when a page returns partial data together with GraphQL `errors`, or omits `pullRequest`/`reviewThreads`, so a partial thread list is never treated as complete. Refs F2iLLC/vigil#158.
 
 ### Added
